@@ -55,6 +55,8 @@ def _load_connections() -> dict:
             'chips': [],
         })
         default['active_connection_id'] = conn_id
+        # Persist immediately so the UUID stays stable across calls
+        _save_connections(default)
     return default
 
 
