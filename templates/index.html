@@ -674,7 +674,7 @@ function saveConnection() {
     system_prompt: document.getElementById('connFormSystemPrompt').value,
     chips: document.getElementById('connFormChips').value.split(',').map(s => s.trim()).filter(Boolean),
   };
-  const url = id ? `/api/connections/${id}` : '/api/connections';
+  const url = id ? `${API_BASE}/api/connections/${id}` : API_BASE + '/api/connections';
   const method = id ? 'PUT' : 'POST';
   fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     .then(r => r.json())
