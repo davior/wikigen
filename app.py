@@ -85,12 +85,20 @@ def _get_connection_by_id(connection_id: str) -> dict | None:
 
 def get_wiki_client(connection_id: str) -> WikiClient | None:
     if connection_id in _wiki_clients:
-        return _wiki_clients[connection_id]
+        client = _wiki_clients[connection_id]
+        # Re-authenticate if session dropped
+        if not client._connected:
+            client.connect()
+        return client
     conn = _get_connection_by_id(connection_id)
     if not conn:
         return None
     client = WikiClient(conn['wiki_url'], conn['username'], conn['password'])
-    client.connect()
+    ok = client.connect()
+    if not ok:
+        # Still cache it so we don't hammer the wiki with retries,
+        # but surface the auth failure clearly to the caller
+        pass
     _wiki_clients[connection_id] = client
     return client
 

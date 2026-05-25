@@ -9,6 +9,9 @@ class WikiClient:
         self._username = username
         self._password = password
         self._session = requests.Session()
+        self._session.headers.update({
+            'User-Agent': 'WikiGen/3.0 (wiki management bot; https://github.com/davior/wikigen)',
+        })
         self._csrf_token = None
         self._connected = False
         self._last_write_time = 0.0
@@ -53,6 +56,11 @@ class WikiClient:
         if not self._csrf_token:
             self._csrf_token = self._fetch_csrf()
 
+    def _ensure_connected(self):
+        """Re-authenticate if the session has expired."""
+        if not self._connected:
+            self.connect()
+
     def _rate_limit(self):
         elapsed = time.time() - self._last_write_time
         if elapsed < 1.0:
@@ -60,6 +68,7 @@ class WikiClient:
         self._last_write_time = time.time()
 
     def get_page(self, title: str) -> dict:
+        self._ensure_connected()
         r = self._session.get(self._url, params={
             'action': 'query',
             'titles': title,
@@ -91,6 +100,7 @@ class WikiClient:
         }
 
     def page_exists(self, title: str) -> bool:
+        self._ensure_connected()
         r = self._session.get(self._url, params={
             'action': 'query', 'titles': title, 'format': 'json'
         })
@@ -100,6 +110,7 @@ class WikiClient:
         return page_id != '-1' and int(page_id) > 0
 
     def get_all_pages(self) -> list[str]:
+        self._ensure_connected()
         titles = []
         params = {
             'action': 'query', 'list': 'allpages',
@@ -107,6 +118,12 @@ class WikiClient:
         }
         while True:
             r = self._session.get(self._url, params=params)
+            if r.status_code == 403:
+                raise PermissionError(
+                    f'Wiki denied access to allpages (HTTP 403). '
+                    f'Check that your bot account has read permissions, '
+                    f'or try a different operation type that does not require listing all pages.'
+                )
             r.raise_for_status()
             data = r.json()
             titles.extend(p['title'] for p in data['query']['allpages'])
@@ -116,6 +133,7 @@ class WikiClient:
         return titles
 
     def search(self, term: str, limit: int = 50) -> list[dict]:
+        self._ensure_connected()
         r = self._session.get(self._url, params={
             'action': 'query', 'list': 'search',
             'srsearch': term, 'srwhat': 'text',
