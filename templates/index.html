@@ -510,6 +510,9 @@ textarea#prompt::placeholder { color: var(--text3); }
 </div>
 
 <script>
+// Detect proxy subpath so API calls work behind /proxy/5055/ style reverse proxies
+const API_BASE = window.location.pathname.replace(/\/$/, '').replace(/\/[^/]*\.[^/]*$/, '');
+
 // ─── STATE ───
 let pages = [];
 let selectedIndex = -1;
@@ -536,7 +539,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
 // ─── CONNECTIONS ───
 function loadConnections() {
-  fetch('/api/connections')
+  fetch(API_BASE + '/api/connections')
     .then(r => r.json())
     .then(data => {
       connections = data.connections || [];
@@ -548,7 +551,7 @@ function loadConnections() {
 }
 
 function checkConnection() {
-  fetch('/api/check_connection')
+  fetch(API_BASE + '/api/check_connection')
     .then(r => r.json())
     .then(d => {
       const dot = document.getElementById('statusDot');
@@ -583,7 +586,7 @@ function renderChips() {
 
 // Connections modal
 function openConnectionsModal() {
-  fetch('/api/connections')
+  fetch(API_BASE + '/api/connections')
     .then(r => r.json())
     .then(data => {
       connections = data.connections || [];
@@ -620,7 +623,7 @@ function renderConnectionsModal() {
 }
 
 function activateConn(id) {
-  fetch(`/api/connections/${id}/activate`, { method: 'POST' })
+  fetch(`${API_BASE}/api/connections/${id}/activate`, { method: 'POST' })
     .then(r => r.json())
     .then(() => { activeConnectionId = id; openConnectionsModal(); checkConnection(); renderChips(); });
 }
@@ -641,7 +644,7 @@ function editConn(id) {
 
 function deleteConn(id) {
   if (!confirm('Delete this connection?')) return;
-  fetch(`/api/connections/${id}`, { method: 'DELETE' })
+  fetch(`${API_BASE}/api/connections/${id}`, { method: 'DELETE' })
     .then(() => openConnectionsModal());
 }
 
@@ -754,7 +757,7 @@ async function doPlan() {
   } else {
     showLoading('PLANNING OPERATION...', 'Calling Anthropic API');
     try {
-      const resp = await fetch('/api/agent/plan', {
+      const resp = await fetch(API_BASE + '/api/agent/plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -780,7 +783,7 @@ async function planRecursive(instruction) {
   showLoading('STARTING RECURSIVE PLANNING...', 'This may take several minutes');
 
   // Initiate job
-  const resp = await fetch('/api/agent/plan', {
+  const resp = await fetch(API_BASE + '/api/agent/plan', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -801,7 +804,7 @@ async function planRecursive(instruction) {
 
   // Stream steps via SSE
   return new Promise((resolve) => {
-    const es = new EventSource(`/api/agent/plan/stream/${planId}`);
+    const es = new EventSource(`${API_BASE}/api/agent/plan/stream/${planId}`);
     es.onmessage = (e) => {
       const event = JSON.parse(e.data);
       if (event.type === 'step') {
@@ -940,7 +943,7 @@ async function executeApproved() {
   showLoading('EXECUTING PLAN...', `Writing ${approvedIds.length} pages to wiki`);
 
   try {
-    const resp = await fetch('/api/agent/execute_plan', {
+    const resp = await fetch(API_BASE + '/api/agent/execute_plan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1131,7 +1134,7 @@ function publishCurrent() {
   const content = document.getElementById('content-editor').value;
   showLoading('PUBLISHING...', `Writing "${title}" to wiki`);
 
-  fetch('/api/publish', {
+  fetch(API_BASE + '/api/publish', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ title, content, summary: activeEditorPage.summary || 'Published via WikiGen', connection_id: activeConnectionId }),
@@ -1154,7 +1157,7 @@ function publishCurrent() {
 function publishAll() {
   if (!pages.length) return;
   showLoading('PUBLISHING ALL...', `Writing ${pages.length} pages`);
-  fetch('/api/publish_all', {
+  fetch(API_BASE + '/api/publish_all', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ pages, connection_id: activeConnectionId }),
@@ -1206,7 +1209,7 @@ function doSearch(e) {
   const params = new URLSearchParams({ term });
   if (activeConnectionId) params.set('connection_id', activeConnectionId);
 
-  fetch(`/api/wiki/search?${params}`)
+  fetch(`${API_BASE}/api/wiki/search?${params}`)
     .then(r => r.json())
     .then(data => {
       if (data.error) { showToast(data.error, 'error'); return; }
@@ -1238,7 +1241,7 @@ function loadWikiPage(title) {
   if (activeConnectionId) params.set('connection_id', activeConnectionId);
 
   showLoading('LOADING PAGE...', title);
-  fetch(`/api/wiki/page?${params}`)
+  fetch(`${API_BASE}/api/wiki/page?${params}`)
     .then(r => r.json())
     .then(page => {
       hideLoading();
@@ -1251,7 +1254,7 @@ function loadAndContext(title) {
   const params = new URLSearchParams({ title });
   if (activeConnectionId) params.set('connection_id', activeConnectionId);
 
-  fetch(`/api/wiki/page?${params}`)
+  fetch(`${API_BASE}/api/wiki/page?${params}`)
     .then(r => r.json())
     .then(page => {
       openPageInEditor(page);
