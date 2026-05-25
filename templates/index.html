@@ -1,0 +1,1405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WikiGen v3 — Wiki Management Agent</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0b0e;
+  --bg2: #0f1117;
+  --bg3: #141820;
+  --bg4: #1a2030;
+  --border: #1e2a3a;
+  --border2: #243040;
+  --accent: #00d4ff;
+  --accent2: #ff6b35;
+  --accent3: #39ff14;
+  --text: #c8d8e8;
+  --text2: #6a8aaa;
+  --text3: #3a5a7a;
+  --danger: #ff2244;
+  --warn: #ffaa00;
+  --node-default: #1a3a5a;
+  --node-exists: #2a1a0a;
+  --node-selected: #003a5a;
+  --node-published: #0a2a1a;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: 'Rajdhani', sans-serif; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+
+/* ─── HEADER ─── */
+header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 0 16px; height: 52px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.logo { font-family: 'Share Tech Mono', monospace; font-size: 13px; color: var(--accent); letter-spacing: 3px; text-transform: uppercase; white-space: nowrap; }
+.logo span { color: var(--accent2); }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text3); flex-shrink: 0; transition: background 0.3s; }
+.status-dot.connected { background: var(--accent3); box-shadow: 0 0 6px var(--accent3); }
+.status-dot.error { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+.status-text { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--text3); letter-spacing: 1px; }
+.header-spacer { flex: 1; }
+.header-stat { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--text3); letter-spacing: 1px; }
+.header-stat span { color: var(--accent); }
+.icon-btn { background: none; border: 1px solid var(--border2); border-radius: 3px; color: var(--text3); cursor: pointer; font-size: 14px; padding: 4px 8px; transition: all 0.15s; }
+.icon-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ─── MAIN ─── */
+.main { display: flex; flex: 1; overflow: hidden; }
+
+/* ─── LEFT PANEL ─── */
+.left-panel { width: 300px; flex-shrink: 0; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+.panel-header { padding: 12px 14px 8px; border-bottom: 1px solid var(--border); font-size: 10px; font-family: 'IBM Plex Mono', monospace; color: var(--text3); letter-spacing: 2px; text-transform: uppercase; }
+
+/* Op type chips */
+.op-type-row { padding: 10px 12px 6px; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 4px; }
+.op-chip { font-size: 9px; font-family: 'IBM Plex Mono', monospace; padding: 3px 7px; background: var(--bg4); border: 1px solid var(--border2); border-radius: 2px; color: var(--text3); cursor: pointer; transition: all 0.15s; letter-spacing: 0.5px; white-space: nowrap; }
+.op-chip:hover { border-color: var(--accent); color: var(--accent); }
+.op-chip.active { border-color: var(--accent); color: var(--accent); background: rgba(0,212,255,0.08); }
+
+/* Prompt area */
+.prompt-area { padding: 12px; border-bottom: 1px solid var(--border); }
+.prompt-label { font-size: 11px; font-family: 'IBM Plex Mono', monospace; color: var(--text3); letter-spacing: 1px; margin-bottom: 6px; }
+textarea#prompt { width: 100%; background: var(--bg3); border: 1px solid var(--border2); border-radius: 3px; color: var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 12px; padding: 9px; resize: vertical; min-height: 80px; outline: none; line-height: 1.5; transition: border-color 0.2s; }
+textarea#prompt:focus { border-color: var(--accent); }
+textarea#prompt::placeholder { color: var(--text3); }
+
+.context-indicator { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 10px; font-family: 'IBM Plex Mono', monospace; color: var(--text3); }
+.context-badge { background: var(--accent3); color: var(--bg); padding: 1px 6px; border-radius: 2px; font-size: 9px; display: none; }
+
+.suggestions { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 4px; }
+.suggestion-chip { font-size: 10px; font-family: 'IBM Plex Mono', monospace; padding: 3px 7px; background: var(--bg4); border: 1px solid var(--border2); border-radius: 2px; color: var(--text3); cursor: pointer; transition: all 0.15s; white-space: nowrap; }
+.suggestion-chip:hover { border-color: var(--accent2); color: var(--accent2); }
+
+/* Buttons */
+.btn { display: block; width: 100%; padding: 9px 14px; border: none; border-radius: 3px; cursor: pointer; font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 13px; letter-spacing: 2px; text-transform: uppercase; transition: all 0.15s; margin-top: 9px; }
+.btn-primary { background: var(--accent); color: var(--bg); }
+.btn-primary:hover { background: #00b8e0; }
+.btn-primary:disabled { background: var(--bg4); color: var(--text3); cursor: not-allowed; }
+.btn-success { background: var(--accent3); color: var(--bg); font-size: 11px; padding: 7px 14px; }
+.btn-success:hover { background: #2aee10; }
+.btn-success:disabled { background: var(--bg4); color: var(--text3); cursor: not-allowed; }
+.btn-danger { background: transparent; border: 1px solid var(--danger); color: var(--danger); font-size: 10px; padding: 5px 10px; width: auto; margin-top: 0; }
+.btn-danger:hover { background: var(--danger); color: white; }
+.btn-sm { width: auto; display: inline-block; margin-top: 0; padding: 5px 12px; font-size: 10px; }
+.btn-ghost { background: none; border: 1px solid var(--border2); color: var(--text2); font-size: 10px; padding: 5px 10px; width: auto; margin-top: 0; }
+.btn-ghost:hover { border-color: var(--text2); color: var(--text); }
+
+/* Page list */
+.page-list { flex: 1; overflow-y: auto; padding: 8px; }
+.page-list::-webkit-scrollbar { width: 4px; }
+.page-list::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+.page-item { padding: 9px 11px; margin-bottom: 5px; background: var(--bg3); border: 1px solid var(--border); border-radius: 3px; cursor: pointer; transition: all 0.15s; position: relative; }
+.page-item:hover { border-color: var(--accent); }
+.page-item.selected { border-color: var(--accent); background: var(--node-selected); }
+.page-item.published { border-color: var(--accent3); }
+.page-item-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 2px; padding-right: 48px; }
+.page-item-summary { font-size: 10px; color: var(--text2); font-family: 'IBM Plex Mono', monospace; line-height: 1.4; }
+.page-item-badge { position: absolute; top: 7px; right: 7px; font-size: 9px; font-family: 'IBM Plex Mono', monospace; padding: 2px 5px; border-radius: 2px; letter-spacing: 1px; }
+.badge-new { background: var(--accent); color: var(--bg); }
+.badge-exists { background: var(--warn); color: var(--bg); }
+.badge-published { background: var(--accent3); color: var(--bg); }
+.list-actions { padding: 9px 12px; border-top: 1px solid var(--border); display: flex; gap: 7px; }
+
+/* ─── CENTRE PANEL ─── */
+.centre-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
+.centre-tabs { display: flex; background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.centre-tab { flex: 1; padding: 11px 8px; background: none; border: none; color: var(--text3); font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; }
+.centre-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.centre-pane { display: none; flex: 1; overflow: hidden; }
+.centre-pane.active { display: flex; flex-direction: column; }
+
+/* PLAN TAB */
+.plan-header { padding: 12px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; background: var(--bg2); }
+.plan-description { font-size: 12px; color: var(--text2); font-family: 'IBM Plex Mono', monospace; line-height: 1.5; margin-bottom: 10px; }
+.plan-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.plan-empty { padding: 50px 20px; text-align: center; }
+.plan-empty-text { font-family: 'Share Tech Mono', monospace; font-size: 11px; color: var(--text3); letter-spacing: 3px; line-height: 2; text-transform: uppercase; }
+.plan-empty-hint { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--text3); margin-top: 12px; opacity: 0.5; }
+.step-list { flex: 1; overflow-y: auto; padding: 10px; }
+.step-list::-webkit-scrollbar { width: 4px; }
+.step-list::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+/* Step items */
+.step-item { background: var(--bg2); border: 1px solid var(--border); border-radius: 3px; margin-bottom: 6px; transition: border-color 0.15s; cursor: pointer; }
+.step-item:hover { border-color: var(--border2); }
+.step-item.approved { border-color: var(--accent); }
+.step-item.executing { border-color: var(--warn); }
+.step-item.done { border-color: var(--accent3); }
+.step-item.failed { border-color: var(--danger); }
+.step-item.rejected { opacity: 0.4; }
+.step-header { padding: 9px 11px; display: flex; align-items: center; gap: 8px; }
+.step-badge { font-size: 8px; font-family: 'IBM Plex Mono', monospace; padding: 2px 6px; border-radius: 2px; letter-spacing: 1px; flex-shrink: 0; }
+.badge-write { background: var(--accent); color: var(--bg); }
+.badge-edit { background: var(--warn); color: var(--bg); }
+.badge-move { background: #9b59b6; color: white; }
+.badge-delete { background: var(--danger); color: white; }
+.badge-replace { background: var(--accent2); color: var(--bg); }
+.step-title { flex: 1; font-size: 13px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step-status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.step-status-dot.pending { background: var(--text3); }
+.step-status-dot.approved { background: var(--accent); box-shadow: 0 0 4px var(--accent); }
+.step-status-dot.executing { background: var(--warn); box-shadow: 0 0 4px var(--warn); }
+.step-status-dot.done { background: var(--accent3); box-shadow: 0 0 4px var(--accent3); }
+.step-status-dot.failed { background: var(--danger); box-shadow: 0 0 4px var(--danger); }
+.step-status-dot.rejected { background: var(--danger); opacity: 0.4; }
+.step-controls { display: flex; gap: 5px; flex-shrink: 0; }
+.step-btn { font-size: 9px; font-family: 'IBM Plex Mono', monospace; padding: 2px 7px; border-radius: 2px; cursor: pointer; border: none; transition: all 0.15s; letter-spacing: 0.5px; }
+.step-btn-approve { background: rgba(0,212,255,0.15); color: var(--accent); border: 1px solid rgba(0,212,255,0.3); }
+.step-btn-approve:hover { background: var(--accent); color: var(--bg); }
+.step-btn-reject { background: rgba(255,34,68,0.1); color: var(--danger); border: 1px solid rgba(255,34,68,0.2); }
+.step-btn-reject:hover { background: var(--danger); color: white; }
+.step-summary { padding: 0 11px 9px; font-size: 10px; color: var(--text2); font-family: 'IBM Plex Mono', monospace; line-height: 1.4; }
+.step-error { padding: 5px 11px; font-size: 10px; color: var(--danger); font-family: 'IBM Plex Mono', monospace; }
+
+/* GRAPH TAB */
+.graph-panel { flex: 1; position: relative; overflow: hidden; }
+.graph-panel svg { width: 100%; height: 100%; }
+.graph-empty { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); text-align: center; pointer-events: none; }
+.graph-empty .big-text { font-family: 'Share Tech Mono', monospace; font-size: 11px; color: var(--text3); letter-spacing: 3px; text-transform: uppercase; line-height: 2; }
+.graph-empty .hint { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--text3); margin-top: 12px; opacity: 0.5; }
+.graph-legend { position: absolute; top: 14px; right: 14px; display: flex; gap: 12px; }
+.legend-item { display: flex; align-items: center; gap: 5px; font-family: 'IBM Plex Mono', monospace; font-size: 9px; color: var(--text3); letter-spacing: 1px; }
+.legend-dot { width: 8px; height: 8px; border-radius: 50%; border: 2px solid; flex-shrink: 0; }
+.graph-info { position: absolute; bottom: 14px; left: 14px; font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--text3); letter-spacing: 1px; pointer-events: none; }
+.node circle { stroke-width: 2; cursor: pointer; }
+.node text { font-family: 'Rajdhani', sans-serif; font-weight: 600; fill: var(--text); pointer-events: none; font-size: 10px; }
+.link { stroke: var(--border2); stroke-width: 1.5; fill: none; }
+
+/* SEARCH TAB */
+.search-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.search-input-row { padding: 12px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; flex-shrink: 0; background: var(--bg2); }
+.search-input { flex: 1; background: var(--bg3); border: 1px solid var(--border2); border-radius: 3px; color: var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 12px; padding: 8px 10px; outline: none; }
+.search-input:focus { border-color: var(--accent); }
+.search-btn { background: var(--accent); border: none; border-radius: 3px; color: var(--bg); font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 12px; padding: 8px 16px; cursor: pointer; letter-spacing: 1px; transition: background 0.15s; }
+.search-btn:hover { background: #00b8e0; }
+.search-results { flex: 1; overflow-y: auto; padding: 8px; }
+.search-results::-webkit-scrollbar { width: 4px; }
+.search-results::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+.search-result { padding: 9px 11px; margin-bottom: 5px; background: var(--bg2); border: 1px solid var(--border); border-radius: 3px; cursor: pointer; transition: border-color 0.15s; }
+.search-result:hover { border-color: var(--accent); }
+.search-result-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 3px; }
+.search-result-snippet { font-size: 10px; color: var(--text2); font-family: 'IBM Plex Mono', monospace; line-height: 1.4; }
+.search-result-actions { display: flex; gap: 6px; margin-top: 6px; }
+
+/* ─── RIGHT PANEL ─── */
+.right-panel { width: 440px; flex-shrink: 0; background: var(--bg2); border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; transition: transform 0.25s, width 0.25s; }
+.right-panel.hidden { transform: translateX(440px); width: 0; overflow: hidden; }
+.editor-header { padding: 11px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.editor-title { flex: 1; font-size: 14px; font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.editor-close { background: none; border: none; color: var(--text3); cursor: pointer; font-size: 16px; padding: 2px 5px; transition: color 0.15s; flex-shrink: 0; }
+.editor-close:hover { color: var(--text); }
+.editor-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.editor-tab { flex: 1; padding: 8px; background: none; border: none; color: var(--text3); font-family: 'IBM Plex Mono', monospace; font-size: 9px; letter-spacing: 1px; text-transform: uppercase; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; }
+.editor-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.editor-body { flex: 1; overflow: hidden; position: relative; }
+.editor-pane { position: absolute; inset: 0; overflow-y: auto; padding: 12px; display: none; }
+.editor-pane.active { display: block; }
+.editor-pane::-webkit-scrollbar { width: 4px; }
+.editor-pane::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+#content-editor { width: 100%; height: calc(100% - 8px); min-height: 400px; background: var(--bg3); border: 1px solid var(--border2); border-radius: 3px; color: var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 11px; resize: none; outline: none; line-height: 1.7; }
+#content-editor:focus { border-color: var(--accent); }
+
+/* Preview */
+.wiki-preview h2 { font-size: 15px; font-weight: 700; color: var(--accent); margin: 14px 0 7px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+.wiki-preview h3 { font-size: 13px; font-weight: 600; color: var(--text); margin: 11px 0 5px; }
+.wiki-preview p { font-size: 12px; line-height: 1.7; color: var(--text2); margin-bottom: 9px; }
+.wiki-preview ul, .wiki-preview ol { margin: 0 0 9px 16px; font-size: 12px; color: var(--text2); line-height: 1.7; }
+.wiki-preview a { color: var(--accent); text-decoration: none; }
+.wiki-preview a:hover { text-decoration: underline; }
+.wiki-preview .wikilink { color: var(--accent2); }
+.wiki-preview .category { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--text3); margin-top: 14px; padding-top: 9px; border-top: 1px solid var(--border); }
+.links-preview { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.link-chip { font-size: 10px; font-family: 'IBM Plex Mono', monospace; padding: 3px 7px; background: var(--bg4); border: 1px solid var(--border2); border-radius: 2px; color: var(--accent2); }
+
+/* Diff view */
+.diff-view { font-family: 'IBM Plex Mono', monospace; font-size: 10px; line-height: 1.6; }
+.diff-line { padding: 1px 6px; white-space: pre-wrap; word-break: break-all; }
+.diff-add { background: rgba(57,255,20,0.08); color: #39ff14; }
+.diff-remove { background: rgba(255,34,68,0.1); color: #ff2244; }
+.diff-meta { color: var(--text3); }
+.diff-context { color: var(--text3); }
+.diff-empty { text-align: center; padding: 30px; color: var(--text3); font-size: 11px; }
+
+/* Editor footer */
+.editor-footer { padding: 10px 12px; border-top: 1px solid var(--border); display: flex; gap: 7px; align-items: center; flex-shrink: 0; flex-wrap: wrap; }
+.context-btn { background: none; border: 1px solid var(--border2); border-radius: 3px; color: var(--text3); cursor: pointer; font-family: 'IBM Plex Mono', monospace; font-size: 9px; padding: 4px 9px; letter-spacing: 0.5px; transition: all 0.15s; }
+.context-btn:hover { border-color: var(--accent3); color: var(--accent3); }
+.context-btn.active { border-color: var(--accent3); color: var(--accent3); background: rgba(57,255,20,0.08); }
+.open-wiki-btn { background: none; border: 1px solid var(--border2); border-radius: 3px; color: var(--text3); cursor: pointer; font-family: 'IBM Plex Mono', monospace; font-size: 9px; padding: 4px 9px; letter-spacing: 0.5px; text-decoration: none; display: inline-block; transition: all 0.15s; }
+.open-wiki-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ─── LOADING OVERLAY ─── */
+.loading-overlay { position: fixed; inset: 0; background: rgba(10,11,14,0.85); display: none; align-items: center; justify-content: center; z-index: 100; }
+.loading-overlay.active { display: flex; }
+.loading-box { background: var(--bg2); border: 1px solid var(--accent); border-radius: 4px; padding: 28px 38px; text-align: center; }
+.spinner { width: 38px; height: 38px; border: 2px solid var(--border2); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 14px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-text { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--accent); letter-spacing: 2px; }
+.loading-sub { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--text3); margin-top: 5px; letter-spacing: 1px; }
+
+/* ─── TOAST ─── */
+.toast-container { position: fixed; bottom: 18px; right: 18px; z-index: 200; display: flex; flex-direction: column; gap: 7px; }
+.toast { background: var(--bg2); border: 1px solid var(--border2); border-radius: 3px; padding: 9px 13px; font-family: 'IBM Plex Mono', monospace; font-size: 10px; min-width: 220px; animation: toastIn 0.2s ease; display: flex; align-items: center; gap: 9px; }
+.toast.success { border-color: var(--accent3); }
+.toast.error { border-color: var(--danger); }
+.toast.info { border-color: var(--accent); }
+.toast-icon { font-size: 13px; flex-shrink: 0; }
+@keyframes toastIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
+
+/* ─── MODAL ─── */
+.modal-overlay { position: fixed; inset: 0; background: rgba(10,11,14,0.9); z-index: 300; display: none; align-items: center; justify-content: center; }
+.modal-overlay.active { display: flex; }
+.modal-box { background: var(--bg2); border: 1px solid var(--border); border-radius: 4px; width: 580px; max-height: 80vh; display: flex; flex-direction: column; }
+.modal-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; }
+.modal-title { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text3); letter-spacing: 2px; text-transform: uppercase; flex: 1; }
+.modal-close { background: none; border: none; color: var(--text3); cursor: pointer; font-size: 18px; padding: 2px 6px; }
+.modal-close:hover { color: var(--text); }
+.modal-body { padding: 18px 20px; overflow-y: auto; flex: 1; }
+.modal-footer { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; }
+
+/* Connection form */
+.form-group { margin-bottom: 14px; }
+.form-label { font-size: 10px; font-family: 'IBM Plex Mono', monospace; color: var(--text3); letter-spacing: 1px; margin-bottom: 5px; display: block; text-transform: uppercase; }
+.form-input, .form-textarea { width: 100%; background: var(--bg3); border: 1px solid var(--border2); border-radius: 3px; color: var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 8px 10px; outline: none; transition: border-color 0.2s; }
+.form-input:focus, .form-textarea:focus { border-color: var(--accent); }
+.form-textarea { resize: vertical; min-height: 80px; line-height: 1.5; }
+.form-hint { font-size: 9px; font-family: 'IBM Plex Mono', monospace; color: var(--text3); margin-top: 4px; }
+
+/* Connection list */
+.conn-item { padding: 10px 12px; background: var(--bg3); border: 1px solid var(--border); border-radius: 3px; margin-bottom: 7px; display: flex; align-items: center; gap: 10px; }
+.conn-item.active-conn { border-color: var(--accent3); }
+.conn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text3); flex-shrink: 0; }
+.conn-dot.active-conn { background: var(--accent3); }
+.conn-name { font-size: 13px; font-weight: 600; flex: 1; }
+.conn-url { font-size: 9px; font-family: 'IBM Plex Mono', monospace; color: var(--text3); }
+
+/* Section label */
+.section-label { font-size: 10px; font-family: 'IBM Plex Mono', monospace; color: var(--text3); letter-spacing: 1px; margin-bottom: 5px; text-transform: uppercase; }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<header>
+  <div class="logo">WIKI<span>GEN</span> v3</div>
+  <div class="status-dot" id="statusDot"></div>
+  <div class="status-text" id="statusText">CHECKING...</div>
+  <div class="status-text" id="connName" style="color:var(--text2);margin-left:2px"></div>
+  <div class="header-spacer"></div>
+  <div class="header-stat" style="margin-right:12px">CONTEXT: <span id="contextCount">0</span></div>
+  <div class="header-stat" style="margin-right:12px">STEPS: <span id="totalSteps">0</span></div>
+  <button class="icon-btn" onclick="openConnectionsModal()" title="Connections">⚙</button>
+</header>
+
+<!-- MAIN -->
+<div class="main">
+
+  <!-- LEFT PANEL -->
+  <div class="left-panel">
+    <div class="panel-header">// OPERATION CONTROL</div>
+
+    <div class="op-type-row" id="opTypeRow">
+      <div class="op-chip active" data-op="auto" onclick="setOpType('auto')">AUTO</div>
+      <div class="op-chip" data-op="generate_pages" onclick="setOpType('generate_pages')">GENERATE</div>
+      <div class="op-chip" data-op="generate_recursive" onclick="setOpType('generate_recursive')">RECURSIVE</div>
+      <div class="op-chip" data-op="edit_pages" onclick="setOpType('edit_pages')">EDIT</div>
+      <div class="op-chip" data-op="find_replace" onclick="setOpType('find_replace')">FIND+REPLACE</div>
+      <div class="op-chip" data-op="ensure_disambig" onclick="setOpType('ensure_disambig')">DISAMBIG</div>
+      <div class="op-chip" data-op="rename_pages" onclick="setOpType('rename_pages')">RENAME</div>
+      <div class="op-chip" data-op="audit_pages" onclick="setOpType('audit_pages')">AUDIT</div>
+    </div>
+
+    <div class="prompt-area">
+      <div class="prompt-label">// INSTRUCTION</div>
+      <textarea id="prompt" placeholder="Describe what to do...&#10;e.g. Create pages covering Transhumanism, its key figures, technologies and the Singularity concept"></textarea>
+      <div class="context-indicator">
+        <span style="font-size:9px">CONTEXT:</span>
+        <span class="context-badge" id="contextBadge">0 pages</span>
+        <span id="contextHint" style="font-size:9px;opacity:0.6">none loaded</span>
+        <span style="flex:1"></span>
+        <button class="step-btn" style="font-size:8px;padding:1px 5px;background:rgba(255,34,68,0.1);color:var(--danger);border:1px solid rgba(255,34,68,0.2);border-radius:2px;cursor:pointer" onclick="clearContext()" title="Clear context">✕ CLEAR</button>
+      </div>
+      <div class="suggestions" id="suggestions"></div>
+      <button class="btn btn-primary" id="planBtn" onclick="doPlan()">⚡ PLAN OPERATION</button>
+    </div>
+
+    <!-- Legacy page list for generate flow -->
+    <div class="page-list" id="pageList" style="display:none">
+      <!-- populated by renderPageList() -->
+    </div>
+    <div class="list-actions" id="listActions" style="display:none">
+      <button class="btn btn-success btn-sm" onclick="publishAll()">✓ PUBLISH ALL</button>
+      <button class="btn btn-danger" onclick="clearAll()">✕ CLEAR</button>
+    </div>
+  </div>
+
+  <!-- CENTRE PANEL -->
+  <div class="centre-panel">
+    <div class="centre-tabs">
+      <button class="centre-tab active" id="tab-plan" onclick="switchCentreTab('plan')">PLAN</button>
+      <button class="centre-tab" id="tab-graph" onclick="switchCentreTab('graph')">GRAPH</button>
+      <button class="centre-tab" id="tab-search" onclick="switchCentreTab('search')">SEARCH</button>
+    </div>
+
+    <!-- PLAN TAB -->
+    <div class="centre-pane active" id="pane-plan">
+      <div class="plan-header" id="planHeader" style="display:none">
+        <div class="plan-description" id="planDescription"></div>
+        <div class="plan-actions">
+          <button class="btn btn-sm btn-ghost" onclick="approveAll()">✓ APPROVE ALL</button>
+          <button class="btn btn-sm btn-ghost" onclick="rejectAll()">✕ REJECT ALL</button>
+          <button class="btn btn-success btn-sm" onclick="executeApproved()">▶ EXECUTE APPROVED</button>
+        </div>
+      </div>
+      <div class="plan-empty" id="planEmpty">
+        <div class="plan-empty-text">
+          WIKI MANAGEMENT AGENT<br>
+          ─────────────────────<br>
+          AWAITING INSTRUCTION
+        </div>
+        <div class="plan-empty-hint">Select an operation type → Enter instruction → PLAN</div>
+      </div>
+      <div class="step-list" id="stepList"></div>
+    </div>
+
+    <!-- GRAPH TAB -->
+    <div class="centre-pane" id="pane-graph">
+      <div class="graph-panel" id="graphPanel">
+        <svg id="graph"></svg>
+        <div class="graph-empty" id="graphEmpty">
+          <div class="big-text">
+            WIKI KNOWLEDGE GRAPH<br>
+            ─────────────────────<br>
+            NO NODES YET
+          </div>
+          <div class="hint">Generate or plan pages to see the graph</div>
+        </div>
+        <div class="graph-legend">
+          <div class="legend-item"><div class="legend-dot" style="border-color:var(--accent)"></div>NEW</div>
+          <div class="legend-item"><div class="legend-dot" style="border-color:var(--warn)"></div>EXISTS</div>
+          <div class="legend-item"><div class="legend-dot" style="border-color:var(--accent3)"></div>PUBLISHED</div>
+        </div>
+        <div class="graph-info" id="graphInfo"></div>
+      </div>
+    </div>
+
+    <!-- SEARCH TAB -->
+    <div class="centre-pane" id="pane-search">
+      <div class="search-panel">
+        <div class="search-input-row">
+          <input class="search-input" id="searchInput" placeholder="Search wiki pages..." onkeydown="if(e.key==='Enter')doSearch(event)">
+          <button class="search-btn" onclick="doSearch()">SEARCH</button>
+        </div>
+        <div class="search-results" id="searchResults">
+          <div style="padding:30px;text-align:center;color:var(--text3);font-family:'IBM Plex Mono',monospace;font-size:10px">
+            Search the connected wiki for existing pages
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT PANEL / EDITOR -->
+  <div class="right-panel hidden" id="rightPanel">
+    <div class="editor-header">
+      <div class="editor-title" id="editorTitle">—</div>
+      <button class="editor-close" onclick="closeEditor()">✕</button>
+    </div>
+    <div class="editor-tabs">
+      <button class="editor-tab active" onclick="switchEditorTab('preview')">PREVIEW</button>
+      <button class="editor-tab" onclick="switchEditorTab('edit')">EDIT</button>
+      <button class="editor-tab" onclick="switchEditorTab('diff')">DIFF</button>
+      <button class="editor-tab" onclick="switchEditorTab('links')">LINKS</button>
+    </div>
+    <div class="editor-body">
+      <div class="editor-pane active" id="pane-preview">
+        <div class="wiki-preview" id="wikiPreview"></div>
+      </div>
+      <div class="editor-pane" id="pane-edit">
+        <textarea id="content-editor" spellcheck="false"></textarea>
+      </div>
+      <div class="editor-pane" id="pane-diff">
+        <div class="diff-view" id="diffView"></div>
+      </div>
+      <div class="editor-pane" id="pane-links">
+        <div class="section-label" style="margin-bottom:9px">INTERNAL LINKS</div>
+        <div class="links-preview" id="linksPreview"></div>
+        <div class="section-label" style="margin-top:18px;margin-bottom:9px">SUMMARY</div>
+        <div id="pageSummary" style="font-size:11px;color:var(--text2);font-family:'IBM Plex Mono',monospace;line-height:1.7"></div>
+      </div>
+    </div>
+    <div class="editor-footer">
+      <button class="btn btn-success btn-sm" id="publishBtn" onclick="publishCurrent()">✓ PUBLISH</button>
+      <button class="btn btn-primary btn-sm" onclick="saveEdits()">SAVE</button>
+      <button class="context-btn" id="contextBtn" onclick="toggleContext()">+ CONTEXT</button>
+      <a class="open-wiki-btn" id="openWikiBtn" href="#" target="_blank">↗ WIKI</a>
+      <div style="flex:1"></div>
+      <div id="existingWarning" style="display:none;font-size:9px;font-family:'IBM Plex Mono',monospace;color:var(--warn)">⚠ EXISTS</div>
+    </div>
+  </div>
+</div>
+
+<!-- LOADING OVERLAY -->
+<div class="loading-overlay" id="loadingOverlay">
+  <div class="loading-box">
+    <div class="spinner"></div>
+    <div class="loading-text" id="loadingText">PLANNING...</div>
+    <div class="loading-sub" id="loadingSub">Calling Anthropic API</div>
+  </div>
+</div>
+
+<!-- TOAST CONTAINER -->
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- CONNECTIONS MODAL -->
+<div class="modal-overlay" id="connectionsModal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div class="modal-title">// WIKI CONNECTIONS</div>
+      <button class="modal-close" onclick="closeConnectionsModal()">✕</button>
+    </div>
+    <div class="modal-body" id="connectionsModalBody"><!-- populated by renderConnectionsModal() --></div>
+    <div class="modal-footer">
+      <button class="btn btn-primary btn-sm" onclick="showAddConnectionForm()">+ ADD CONNECTION</button>
+    </div>
+  </div>
+</div>
+
+<!-- ADD/EDIT CONNECTION MODAL -->
+<div class="modal-overlay" id="connFormModal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div class="modal-title" id="connFormTitle">// ADD CONNECTION</div>
+      <button class="modal-close" onclick="closeConnFormModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="connFormId">
+      <div class="form-group">
+        <label class="form-label">Connection Name</label>
+        <input class="form-input" id="connFormName" placeholder="Nano World Order">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Wiki API URL</label>
+        <input class="form-input" id="connFormUrl" placeholder="https://yourwiki.com/api.php">
+        <div class="form-hint">Must point to api.php</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Username / Bot Password Name</label>
+        <input class="form-input" id="connFormUsername" placeholder="Username@BotPasswordName">
+        <div class="form-hint">Use Special:BotPasswords for bot accounts</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Password</label>
+        <input class="form-input" type="password" id="connFormPassword">
+      </div>
+      <div class="form-group">
+        <label class="form-label">System Prompt (wiki context for AI)</label>
+        <textarea class="form-textarea" id="connFormSystemPrompt" placeholder="You are a wiki editor for [wiki name], covering topics such as..."></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Quick Prompt Chips (comma separated)</label>
+        <input class="form-input" id="connFormChips" placeholder="Transhumanism, DEWs, TI Program">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" onclick="closeConnFormModal()">CANCEL</button>
+      <button class="btn btn-primary btn-sm" onclick="saveConnection()">SAVE</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── STATE ───
+let pages = [];
+let selectedIndex = -1;
+let simulation = null;
+let publishedSet = new Set();
+let totalPublished = 0;
+
+let currentPlan = null;          // {plan_id, operation_type, description, steps}
+let activeOpType = 'auto';
+let contextPages = [];           // [{title, content, url}]
+let activeCentreTab = 'plan';
+let activeEditorPage = null;     // the page/step currently open in the editor
+let connections = [];
+let activeConnectionId = null;
+
+// ─── INIT ───
+window.addEventListener('DOMContentLoaded', () => {
+  loadConnections();
+  initGraph();
+  document.getElementById('searchInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') doSearch();
+  });
+});
+
+// ─── CONNECTIONS ───
+function loadConnections() {
+  fetch('/api/connections')
+    .then(r => r.json())
+    .then(data => {
+      connections = data.connections || [];
+      activeConnectionId = data.active_connection_id || null;
+      renderChips();
+      checkConnection();
+    })
+    .catch(() => checkConnection());
+}
+
+function checkConnection() {
+  fetch('/api/check_connection')
+    .then(r => r.json())
+    .then(d => {
+      const dot = document.getElementById('statusDot');
+      const txt = document.getElementById('statusText');
+      const name = document.getElementById('connName');
+      if (d.connected) {
+        dot.className = 'status-dot connected';
+        txt.textContent = 'CONNECTED';
+        txt.style.color = 'var(--accent3)';
+        name.textContent = d.name ? `· ${d.name.toUpperCase()}` : '';
+      } else {
+        dot.className = 'status-dot error';
+        txt.textContent = 'DISCONNECTED';
+        txt.style.color = 'var(--danger)';
+        name.textContent = '';
+      }
+    })
+    .catch(() => {
+      document.getElementById('statusDot').className = 'status-dot error';
+      document.getElementById('statusText').textContent = 'ERROR';
+    });
+}
+
+function renderChips() {
+  const conn = connections.find(c => c.id === activeConnectionId) || connections[0];
+  if (!conn || !conn.chips || !conn.chips.length) return;
+  const el = document.getElementById('suggestions');
+  el.innerHTML = conn.chips.map(chip =>
+    `<div class="suggestion-chip" onclick="setPrompt(${JSON.stringify(chip)})">${chip}</div>`
+  ).join('');
+}
+
+// Connections modal
+function openConnectionsModal() {
+  fetch('/api/connections')
+    .then(r => r.json())
+    .then(data => {
+      connections = data.connections || [];
+      activeConnectionId = data.active_connection_id;
+      renderConnectionsModal();
+      document.getElementById('connectionsModal').classList.add('active');
+    });
+}
+
+function closeConnectionsModal() {
+  document.getElementById('connectionsModal').classList.remove('active');
+  loadConnections();
+}
+
+function renderConnectionsModal() {
+  const body = document.getElementById('connectionsModalBody');
+  if (!connections.length) {
+    body.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text3);font-family:\'IBM Plex Mono\',monospace;font-size:10px">No connections yet. Add one below.</div>';
+    return;
+  }
+  body.innerHTML = connections.map(c => {
+    const isActive = c.id === activeConnectionId;
+    return `<div class="conn-item ${isActive ? 'active-conn' : ''}">
+      <div class="conn-dot ${isActive ? 'active-conn' : ''}"></div>
+      <div style="flex:1">
+        <div class="conn-name">${escapeHtml(c.name)}</div>
+        <div class="conn-url">${escapeHtml(c.wiki_url)}</div>
+      </div>
+      ${!isActive ? `<button class="step-btn step-btn-approve" onclick="activateConn('${c.id}')">ACTIVATE</button>` : '<span style="font-size:9px;color:var(--accent3);font-family:\'IBM Plex Mono\',monospace">ACTIVE</span>'}
+      <button class="step-btn" style="background:rgba(255,170,0,0.1);color:var(--warn);border:1px solid rgba(255,170,0,0.2)" onclick="editConn('${c.id}')">EDIT</button>
+      <button class="step-btn step-btn-reject" onclick="deleteConn('${c.id}')">DEL</button>
+    </div>`;
+  }).join('');
+}
+
+function activateConn(id) {
+  fetch(`/api/connections/${id}/activate`, { method: 'POST' })
+    .then(r => r.json())
+    .then(() => { activeConnectionId = id; openConnectionsModal(); checkConnection(); renderChips(); });
+}
+
+function editConn(id) {
+  const conn = connections.find(c => c.id === id);
+  if (!conn) return;
+  document.getElementById('connFormId').value = conn.id;
+  document.getElementById('connFormName').value = conn.name || '';
+  document.getElementById('connFormUrl').value = conn.wiki_url || '';
+  document.getElementById('connFormUsername').value = conn.username || '';
+  document.getElementById('connFormPassword').value = '';
+  document.getElementById('connFormSystemPrompt').value = conn.system_prompt || '';
+  document.getElementById('connFormChips').value = (conn.chips || []).join(', ');
+  document.getElementById('connFormTitle').textContent = '// EDIT CONNECTION';
+  document.getElementById('connFormModal').classList.add('active');
+}
+
+function deleteConn(id) {
+  if (!confirm('Delete this connection?')) return;
+  fetch(`/api/connections/${id}`, { method: 'DELETE' })
+    .then(() => openConnectionsModal());
+}
+
+function showAddConnectionForm() {
+  document.getElementById('connFormId').value = '';
+  document.getElementById('connFormName').value = '';
+  document.getElementById('connFormUrl').value = '';
+  document.getElementById('connFormUsername').value = '';
+  document.getElementById('connFormPassword').value = '';
+  document.getElementById('connFormSystemPrompt').value = '';
+  document.getElementById('connFormChips').value = '';
+  document.getElementById('connFormTitle').textContent = '// ADD CONNECTION';
+  document.getElementById('connFormModal').classList.add('active');
+}
+
+function closeConnFormModal() {
+  document.getElementById('connFormModal').classList.remove('active');
+}
+
+function saveConnection() {
+  const id = document.getElementById('connFormId').value;
+  const body = {
+    name: document.getElementById('connFormName').value,
+    wiki_url: document.getElementById('connFormUrl').value,
+    username: document.getElementById('connFormUsername').value,
+    password: document.getElementById('connFormPassword').value,
+    system_prompt: document.getElementById('connFormSystemPrompt').value,
+    chips: document.getElementById('connFormChips').value.split(',').map(s => s.trim()).filter(Boolean),
+  };
+  const url = id ? `/api/connections/${id}` : '/api/connections';
+  const method = id ? 'PUT' : 'POST';
+  fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { showToast(d.error, 'error'); return; }
+      closeConnFormModal();
+      openConnectionsModal();
+    });
+}
+
+// ─── OP TYPE ───
+function setOpType(type) {
+  activeOpType = type;
+  document.querySelectorAll('.op-chip').forEach(c => {
+    c.classList.toggle('active', c.dataset.op === type);
+  });
+}
+
+function setPrompt(text) {
+  document.getElementById('prompt').value = text;
+  document.getElementById('prompt').focus();
+}
+
+// ─── CONTEXT ───
+function toggleContext() {
+  if (!activeEditorPage) return;
+  const title = activeEditorPage.title;
+  const existing = contextPages.findIndex(p => p.title === title);
+  if (existing >= 0) {
+    contextPages.splice(existing, 1);
+    showToast(`Removed "${title}" from context`, 'info');
+  } else {
+    contextPages.push({
+      title,
+      content: document.getElementById('content-editor').value || activeEditorPage.content || '',
+    });
+    showToast(`Added "${title}" to context`, 'success');
+  }
+  updateContextUI();
+}
+
+function clearContext() {
+  contextPages = [];
+  updateContextUI();
+  showToast('Context cleared', 'info');
+}
+
+function updateContextUI() {
+  const count = contextPages.length;
+  document.getElementById('contextCount').textContent = count;
+  const badge = document.getElementById('contextBadge');
+  const hint = document.getElementById('contextHint');
+  if (count > 0) {
+    badge.style.display = 'inline';
+    badge.textContent = `${count} page${count !== 1 ? 's' : ''}`;
+    hint.textContent = contextPages.map(p => p.title).join(', ');
+  } else {
+    badge.style.display = 'none';
+    hint.textContent = 'none loaded';
+  }
+  // Update context button state
+  const btn = document.getElementById('contextBtn');
+  if (activeEditorPage) {
+    const inContext = contextPages.some(p => p.title === activeEditorPage.title);
+    btn.classList.toggle('active', inContext);
+    btn.textContent = inContext ? '✓ CONTEXT' : '+ CONTEXT';
+  }
+}
+
+// ─── PLAN ───
+async function doPlan() {
+  const instruction = document.getElementById('prompt').value.trim();
+  if (!instruction) { showToast('Enter an instruction first', 'error'); return; }
+
+  const planBtn = document.getElementById('planBtn');
+  planBtn.disabled = true;
+
+  if (activeOpType === 'generate_recursive') {
+    await planRecursive(instruction);
+  } else {
+    showLoading('PLANNING OPERATION...', 'Calling Anthropic API');
+    try {
+      const resp = await fetch('/api/agent/plan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          instruction,
+          operation_type: activeOpType,
+          context_pages: contextPages,
+          connection_id: activeConnectionId,
+        }),
+      });
+      const data = await resp.json();
+      hideLoading();
+      if (data.error) { showToast('Error: ' + data.error, 'error'); planBtn.disabled = false; return; }
+      loadPlan(data);
+    } catch (e) {
+      hideLoading();
+      showToast('Request failed: ' + e.message, 'error');
+    }
+  }
+  planBtn.disabled = false;
+}
+
+async function planRecursive(instruction) {
+  showLoading('STARTING RECURSIVE PLANNING...', 'This may take several minutes');
+
+  // Initiate job
+  const resp = await fetch('/api/agent/plan', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      instruction,
+      operation_type: 'generate_recursive',
+      context_pages: contextPages,
+      connection_id: activeConnectionId,
+    }),
+  });
+  const data = await resp.json();
+  if (data.error) { hideLoading(); showToast('Error: ' + data.error, 'error'); return; }
+
+  const planId = data.plan_id;
+  currentPlan = { plan_id: planId, operation_type: 'generate_recursive', description: 'Planning in progress...', steps: [] };
+  hideLoading();
+  switchCentreTab('plan');
+  renderPlanView();
+
+  // Stream steps via SSE
+  return new Promise((resolve) => {
+    const es = new EventSource(`/api/agent/plan/stream/${planId}`);
+    es.onmessage = (e) => {
+      const event = JSON.parse(e.data);
+      if (event.type === 'step') {
+        if (!currentPlan.steps) currentPlan.steps = [];
+        currentPlan.steps.push(event.step);
+        document.getElementById('totalSteps').textContent = currentPlan.steps.length;
+        appendStepToView(event.step);
+        renderGraph();
+      } else if (event.type === 'plan_complete') {
+        currentPlan.description = event.description;
+        currentPlan.steps = event.steps;
+        renderPlanView();
+        showToast(`Recursive plan complete: ${event.steps.length} pages`, 'success');
+        es.close();
+        resolve();
+      } else if (event.type === 'error') {
+        showToast('Streaming error: ' + event.error, 'error');
+        es.close();
+        resolve();
+      }
+    };
+    es.onerror = () => { es.close(); resolve(); };
+  });
+}
+
+function loadPlan(data) {
+  currentPlan = data;
+  document.getElementById('totalSteps').textContent = (data.steps || []).length;
+  switchCentreTab('plan');
+  renderPlanView();
+  renderGraph();
+  showToast(`Plan ready: ${(data.steps || []).length} steps`, 'success');
+}
+
+function renderPlanView() {
+  if (!currentPlan) return;
+  const empty = document.getElementById('planEmpty');
+  const header = document.getElementById('planHeader');
+  const desc = document.getElementById('planDescription');
+  const list = document.getElementById('stepList');
+
+  empty.style.display = 'none';
+  header.style.display = 'block';
+  desc.textContent = currentPlan.description || '';
+
+  list.innerHTML = '';
+  (currentPlan.steps || []).forEach(step => {
+    list.appendChild(buildStepElement(step));
+  });
+}
+
+function appendStepToView(step) {
+  const empty = document.getElementById('planEmpty');
+  const header = document.getElementById('planHeader');
+  empty.style.display = 'none';
+  header.style.display = 'block';
+  document.getElementById('planDescription').textContent = currentPlan.description || 'Planning...';
+  document.getElementById('stepList').appendChild(buildStepElement(step));
+}
+
+function buildStepElement(step) {
+  const div = document.createElement('div');
+  div.className = `step-item ${step.status}`;
+  div.id = `step-${step.id}`;
+
+  const badgeClass = { write: 'badge-write', edit: 'badge-edit', move: 'badge-move', delete: 'badge-delete', replace: 'badge-replace' }[step.type] || 'badge-write';
+  const badgeLabel = step.type.toUpperCase();
+
+  div.innerHTML = `
+    <div class="step-header">
+      <span class="step-badge ${badgeClass}">${badgeLabel}</span>
+      <span class="step-title">${escapeHtml(step.title)}</span>
+      <div class="step-status-dot ${step.status}"></div>
+      <div class="step-controls">
+        <button class="step-btn step-btn-approve" onclick="approveStep('${step.id}', event)">✓</button>
+        <button class="step-btn step-btn-reject" onclick="rejectStep('${step.id}', event)">✕</button>
+      </div>
+    </div>
+    <div class="step-summary">${escapeHtml(step.summary || '')}</div>
+    ${step.error ? `<div class="step-error">✕ ${escapeHtml(step.error)}</div>` : ''}
+  `;
+
+  div.addEventListener('click', (e) => {
+    if (e.target.classList.contains('step-btn')) return;
+    openStepInEditor(step);
+  });
+
+  return div;
+}
+
+function updateStepElement(step) {
+  const el = document.getElementById(`step-${step.id}`);
+  if (!el) return;
+  el.className = `step-item ${step.status}`;
+  el.querySelector('.step-status-dot').className = `step-status-dot ${step.status}`;
+  const errEl = el.querySelector('.step-error');
+  if (step.error) {
+    if (errEl) errEl.textContent = `✕ ${step.error}`;
+    else el.insertAdjacentHTML('beforeend', `<div class="step-error">✕ ${escapeHtml(step.error)}</div>`);
+  } else if (errEl) {
+    errEl.remove();
+  }
+}
+
+function approveStep(stepId, e) {
+  e && e.stopPropagation();
+  const step = findStep(stepId);
+  if (!step) return;
+  step.status = 'approved';
+  updateStepElement(step);
+}
+
+function rejectStep(stepId, e) {
+  e && e.stopPropagation();
+  const step = findStep(stepId);
+  if (!step) return;
+  step.status = 'rejected';
+  updateStepElement(step);
+}
+
+function approveAll() {
+  if (!currentPlan) return;
+  currentPlan.steps.forEach(s => { if (s.status === 'pending' || s.status === 'rejected') { s.status = 'approved'; updateStepElement(s); } });
+}
+
+function rejectAll() {
+  if (!currentPlan) return;
+  currentPlan.steps.forEach(s => { if (s.status !== 'done') { s.status = 'rejected'; updateStepElement(s); } });
+}
+
+async function executeApproved() {
+  if (!currentPlan) return;
+  const approvedIds = currentPlan.steps.filter(s => s.status === 'approved').map(s => s.id);
+  if (!approvedIds.length) { showToast('No steps approved', 'error'); return; }
+
+  showLoading('EXECUTING PLAN...', `Writing ${approvedIds.length} pages to wiki`);
+
+  try {
+    const resp = await fetch('/api/agent/execute_plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        plan_id: currentPlan.plan_id,
+        approved_step_ids: approvedIds,
+        connection_id: activeConnectionId,
+      }),
+    });
+    const data = await resp.json();
+    hideLoading();
+
+    if (data.error) { showToast('Error: ' + data.error, 'error'); return; }
+
+    // Update step statuses from response
+    (data.steps || []).forEach(s => {
+      const local = findStep(s.id);
+      if (local) { Object.assign(local, s); updateStepElement(local); }
+    });
+
+    const ok = (data.results || []).filter(r => r.success).length;
+    const total = (data.results || []).length;
+    showToast(`Executed ${ok}/${total} steps`, ok === total ? 'success' : 'info');
+    renderGraph();
+  } catch (e) {
+    hideLoading();
+    showToast('Execute failed: ' + e.message, 'error');
+  }
+}
+
+function findStep(stepId) {
+  return currentPlan && currentPlan.steps ? currentPlan.steps.find(s => s.id === stepId) : null;
+}
+
+// ─── EDITOR ───
+function openStepInEditor(step) {
+  activeEditorPage = { title: step.title, content: step.content, summary: step.summary, url: null, diff: step.diff, links_to: step.links_to, step_id: step.id };
+  document.getElementById('rightPanel').classList.remove('hidden');
+  document.getElementById('editorTitle').textContent = step.title;
+  document.getElementById('content-editor').value = step.content || '';
+  document.getElementById('pageSummary').textContent = step.summary || '';
+  document.getElementById('existingWarning').style.display = 'none';
+
+  const linksEl = document.getElementById('linksPreview');
+  linksEl.innerHTML = (step.links_to || []).map(l => `<span class="link-chip">[[${escapeHtml(l)}]]</span>`).join('');
+
+  // Update diff tab
+  renderDiff(step.diff || '');
+
+  // Update open-in-wiki link
+  updateOpenWikiLink(step.title);
+
+  renderPreview(step.content || '');
+  switchEditorTab(step.diff ? 'diff' : 'preview');
+  updateContextUI();
+}
+
+function openPageInEditor(page) {
+  activeEditorPage = { title: page.title, content: page.content, summary: '', url: page.url, diff: null, links_to: [], exists: page.exists };
+  document.getElementById('rightPanel').classList.remove('hidden');
+  document.getElementById('editorTitle').textContent = page.title;
+  document.getElementById('content-editor').value = page.content || '';
+  document.getElementById('pageSummary').textContent = '';
+  document.getElementById('existingWarning').style.display = page.exists ? 'block' : 'none';
+  document.getElementById('linksPreview').innerHTML = '';
+  renderDiff('');
+  updateOpenWikiLink(page.title, page.url);
+  renderPreview(page.content || '');
+  switchEditorTab('preview');
+  updateContextUI();
+}
+
+function closeEditor() {
+  document.getElementById('rightPanel').classList.add('hidden');
+  activeEditorPage = null;
+  selectedIndex = -1;
+  renderPageList();
+}
+
+function switchEditorTab(tab) {
+  document.querySelectorAll('.editor-tab').forEach((t, i) => {
+    const tabs = ['preview', 'edit', 'diff', 'links'];
+    t.classList.toggle('active', tabs[i] === tab);
+  });
+  document.querySelectorAll('.editor-pane').forEach(p => p.classList.remove('active'));
+  document.getElementById('pane-' + tab).classList.add('active');
+  if (tab === 'preview') renderPreview(document.getElementById('content-editor').value);
+}
+
+function renderPreview(markup) {
+  let html = markup
+    .replace(/^===(.*?)===/gm, '<h3>$1</h3>')
+    .replace(/^==(.*?)==/gm, '<h2>$1</h2>')
+    .replace(/'''(.*?)'''/g, '<strong>$1</strong>')
+    .replace(/''(.*?)''/g, '<em>$1</em>')
+    .replace(/\[\[Category:(.*?)\]\]/g, '<span class="category">Category: $1</span>')
+    .replace(/\[\[(.*?)\]\]/g, (m, p1) => {
+      const parts = p1.split('|');
+      const label = parts[1] || parts[0];
+      return `<a href="#" class="wikilink">[[${escapeHtml(label)}]]</a>`;
+    })
+    .replace(/^#(.*)/gm, '<li>$1</li>')
+    .replace(/^\*(.*)/gm, '<li>$1</li>')
+    .replace(/\n\n+/g, '</p><p>')
+    .replace(/\{\{stub\}\}/gi, '<em style="color:var(--text3)">[stub]</em>');
+
+  html = '<p>' + html + '</p>';
+  html = html.replace(/(<\/li>)\s*<li>/g, '</li><li>');
+  html = html.replace(/<p>(<li>.*?<\/li>)<\/p>/gs, '<ul>$1</ul>');
+  document.getElementById('wikiPreview').innerHTML = html;
+}
+
+function renderDiff(diffText) {
+  const el = document.getElementById('diffView');
+  if (!diffText) {
+    el.innerHTML = '<div class="diff-empty">No diff available for this step</div>';
+    return;
+  }
+  el.innerHTML = diffText.split('\n').map(line => {
+    let cls = 'diff-context';
+    if (line.startsWith('+') && !line.startsWith('+++')) cls = 'diff-add';
+    else if (line.startsWith('-') && !line.startsWith('---')) cls = 'diff-remove';
+    else if (line.startsWith('@@')) cls = 'diff-meta';
+    else if (line.startsWith('---') || line.startsWith('+++')) cls = 'diff-meta';
+    return `<div class="diff-line ${cls}">${escapeHtml(line)}</div>`;
+  }).join('');
+}
+
+function saveEdits() {
+  if (!activeEditorPage) return;
+  activeEditorPage.content = document.getElementById('content-editor').value;
+  // If this is a plan step, update its content
+  if (activeEditorPage.step_id && currentPlan) {
+    const step = findStep(activeEditorPage.step_id);
+    if (step) step.content = activeEditorPage.content;
+  }
+  renderPreview(activeEditorPage.content);
+  showToast('Edits saved locally', 'info');
+}
+
+function updateOpenWikiLink(title, directUrl) {
+  const btn = document.getElementById('openWikiBtn');
+  if (directUrl) {
+    btn.href = directUrl;
+  } else {
+    // Try to build URL from active connection
+    const conn = connections.find(c => c.id === activeConnectionId);
+    if (conn && conn.wiki_url) {
+      const base = conn.wiki_url.replace('api.php', '');
+      btn.href = `${base}index.php?title=${encodeURIComponent(title)}`;
+    } else {
+      btn.href = '#';
+    }
+  }
+}
+
+// ─── LEGACY PAGE LIST (for /api/generate backward compat) ───
+function renderPageList() {
+  const list = document.getElementById('pageList');
+  if (!pages.length) {
+    list.innerHTML = '';
+    return;
+  }
+  list.innerHTML = pages.map((p, i) => {
+    const isPublished = publishedSet.has(p.title);
+    const badge = isPublished
+      ? '<span class="page-item-badge badge-published">PUBLISHED</span>'
+      : p.exists
+        ? '<span class="page-item-badge badge-exists">EXISTS</span>'
+        : '<span class="page-item-badge badge-new">NEW</span>';
+    return `<div class="page-item ${selectedIndex === i ? 'selected' : ''} ${isPublished ? 'published' : ''}"
+      onclick="selectPage(${i})">
+      ${badge}
+      <div class="page-item-title">${escapeHtml(p.title)}</div>
+      <div class="page-item-summary">${escapeHtml(p.summary || '')}</div>
+    </div>`;
+  }).join('');
+}
+
+function selectPage(i) {
+  selectedIndex = i;
+  renderPageList();
+  openPageInEditor({ ...pages[i], exists: pages[i].exists });
+}
+
+function publishCurrent() {
+  if (!activeEditorPage) return;
+  const title = activeEditorPage.title;
+  const content = document.getElementById('content-editor').value;
+  showLoading('PUBLISHING...', `Writing "${title}" to wiki`);
+
+  fetch('/api/publish', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, content, summary: activeEditorPage.summary || 'Published via WikiGen', connection_id: activeConnectionId }),
+  })
+  .then(r => r.json())
+  .then(d => {
+    hideLoading();
+    if (d.success) {
+      publishedSet.add(title);
+      totalPublished++;
+      renderPageList();
+      showToast(`Published: ${title}`, 'success');
+    } else {
+      showToast('Publish failed: ' + (d.error || 'Unknown'), 'error');
+    }
+  })
+  .catch(e => { hideLoading(); showToast('Error: ' + e.message, 'error'); });
+}
+
+function publishAll() {
+  if (!pages.length) return;
+  showLoading('PUBLISHING ALL...', `Writing ${pages.length} pages`);
+  fetch('/api/publish_all', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pages, connection_id: activeConnectionId }),
+  })
+  .then(r => r.json())
+  .then(d => {
+    hideLoading();
+    (d.results || []).forEach(r => { if (r.success) { publishedSet.add(r.title); totalPublished++; } });
+    renderPageList();
+    const ok = (d.results || []).filter(r => r.success).length;
+    showToast(`Published ${ok}/${pages.length} pages`, ok === pages.length ? 'success' : 'info');
+  })
+  .catch(e => { hideLoading(); showToast('Error: ' + e.message, 'error'); });
+}
+
+function clearAll() {
+  if (!confirm('Clear all generated pages from this session?')) return;
+  pages = [];
+  selectedIndex = -1;
+  closeEditor();
+  renderPageList();
+  document.getElementById('pageList').style.display = 'none';
+  document.getElementById('listActions').style.display = 'none';
+  clearGraph();
+  document.getElementById('graphEmpty').style.display = 'block';
+}
+
+// ─── CENTRE TABS ───
+function switchCentreTab(tab) {
+  activeCentreTab = tab;
+  document.querySelectorAll('.centre-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('tab-' + tab).classList.add('active');
+  document.querySelectorAll('.centre-pane').forEach(p => p.classList.remove('active'));
+  document.getElementById('pane-' + tab).classList.add('active');
+  if (tab === 'graph') {
+    setTimeout(() => renderGraph(), 50);
+  }
+}
+
+// ─── SEARCH ───
+function doSearch(e) {
+  e && e.preventDefault();
+  const term = document.getElementById('searchInput').value.trim();
+  if (!term) return;
+
+  document.getElementById('searchResults').innerHTML =
+    '<div style="padding:20px;text-align:center;color:var(--text3);font-family:\'IBM Plex Mono\',monospace;font-size:10px">Searching...</div>';
+
+  const params = new URLSearchParams({ term });
+  if (activeConnectionId) params.set('connection_id', activeConnectionId);
+
+  fetch(`/api/wiki/search?${params}`)
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) { showToast(data.error, 'error'); return; }
+      renderSearchResults(data.pages || []);
+    })
+    .catch(e => showToast('Search failed: ' + e.message, 'error'));
+}
+
+function renderSearchResults(results) {
+  const el = document.getElementById('searchResults');
+  if (!results.length) {
+    el.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text3);font-family:\'IBM Plex Mono\',monospace;font-size:10px">No results found</div>';
+    return;
+  }
+  el.innerHTML = results.map(r => `
+    <div class="search-result" onclick="loadWikiPage(${JSON.stringify(r.title)})">
+      <div class="search-result-title">${escapeHtml(r.title)}</div>
+      <div class="search-result-snippet">${escapeHtml(r.snippet || '')}</div>
+      <div class="search-result-actions">
+        <button class="step-btn step-btn-approve" onclick="event.stopPropagation();loadWikiPage(${JSON.stringify(r.title)})">LOAD</button>
+        <button class="step-btn" style="background:rgba(57,255,20,0.1);color:var(--accent3);border:1px solid rgba(57,255,20,0.2)" onclick="event.stopPropagation();loadAndContext(${JSON.stringify(r.title)})">+ CONTEXT</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function loadWikiPage(title) {
+  const params = new URLSearchParams({ title });
+  if (activeConnectionId) params.set('connection_id', activeConnectionId);
+
+  showLoading('LOADING PAGE...', title);
+  fetch(`/api/wiki/page?${params}`)
+    .then(r => r.json())
+    .then(page => {
+      hideLoading();
+      openPageInEditor(page);
+    })
+    .catch(e => { hideLoading(); showToast('Failed to load: ' + e.message, 'error'); });
+}
+
+function loadAndContext(title) {
+  const params = new URLSearchParams({ title });
+  if (activeConnectionId) params.set('connection_id', activeConnectionId);
+
+  fetch(`/api/wiki/page?${params}`)
+    .then(r => r.json())
+    .then(page => {
+      openPageInEditor(page);
+      if (!contextPages.some(p => p.title === title)) {
+        contextPages.push({ title: page.title, content: page.content || '' });
+        updateContextUI();
+        showToast(`Added "${title}" to context`, 'success');
+      }
+    })
+    .catch(e => showToast('Failed: ' + e.message, 'error'));
+}
+
+// ─── D3 GRAPH ───
+let svg, linkLayer, nodeLayer, graphWidth, graphHeight;
+
+function initGraph() {
+  const el = document.getElementById('graph');
+  const panel = document.getElementById('graphPanel');
+  const rect = panel.getBoundingClientRect();
+  graphWidth = rect.width || 800;
+  graphHeight = rect.height || 600;
+
+  svg = d3.select('#graph').attr('viewBox', `0 0 ${graphWidth} ${graphHeight}`);
+
+  const defs = svg.append('defs');
+  const pattern = defs.append('pattern').attr('id', 'grid').attr('width', 40).attr('height', 40).attr('patternUnits', 'userSpaceOnUse');
+  pattern.append('path').attr('d', 'M 40 0 L 0 0 0 40').attr('fill', 'none').attr('stroke', '#1a2030').attr('stroke-width', '0.5');
+  svg.append('rect').attr('width', graphWidth).attr('height', graphHeight).attr('fill', 'url(#grid)');
+
+  linkLayer = svg.append('g').attr('class', 'links');
+  nodeLayer = svg.append('g').attr('class', 'nodes');
+
+  const zoom = d3.zoom().scaleExtent([0.3, 3]).on('zoom', e => {
+    linkLayer.attr('transform', e.transform);
+    nodeLayer.attr('transform', e.transform);
+  });
+  svg.call(zoom);
+}
+
+function renderGraph() {
+  // Build nodes from both currentPlan steps and legacy pages
+  const nodeMap = new Map();
+  const linkList = [];
+  const linkSet = new Set();
+
+  const addNodes = (items) => {
+    items.forEach((item, i) => {
+      if (!nodeMap.has(item.title)) {
+        nodeMap.set(item.title, { id: item.title, index: nodeMap.size, status: item.status || (item.exists ? 'exists' : 'new'), published: publishedSet.has(item.title) });
+      }
+      (item.links_to || []).forEach(target => {
+        const key = [item.title, target].sort().join('|');
+        if (!linkSet.has(key) && nodeMap.has(item.title)) {
+          linkSet.add(key);
+          linkList.push({ source: item.title, target });
+        }
+      });
+    });
+  };
+
+  if (currentPlan && currentPlan.steps) addNodes(currentPlan.steps);
+  if (pages.length) addNodes(pages);
+
+  if (!nodeMap.size) {
+    document.getElementById('graphEmpty').style.display = 'block';
+    return;
+  }
+  document.getElementById('graphEmpty').style.display = 'none';
+
+  linkLayer.selectAll('*').remove();
+  nodeLayer.selectAll('*').remove();
+  if (simulation) simulation.stop();
+
+  const nodes = Array.from(nodeMap.values());
+  const links = linkList.filter(l => nodeMap.has(l.source) && nodeMap.has(l.target));
+
+  simulation = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(links).id(d => d.id).distance(130))
+    .force('charge', d3.forceManyBody().strength(-260))
+    .force('center', d3.forceCenter(graphWidth / 2, graphHeight / 2))
+    .force('collision', d3.forceCollide(38));
+
+  linkLayer.selectAll('.link').data(links).join('line').attr('class', 'link');
+
+  const nodeGroup = nodeLayer.selectAll('.node').data(nodes).join('g').attr('class', 'node')
+    .call(d3.drag()
+      .on('start', (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end', (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
+    );
+
+  nodeGroup.append('circle').attr('r', 12)
+    .attr('fill', d => d.published ? '#0a2a1a' : d.status === 'exists' ? '#2a1a0a' : d.status === 'done' ? '#0a2a1a' : '#0a1a2a')
+    .attr('stroke', d => d.published || d.status === 'done' ? 'var(--accent3)' : d.status === 'exists' ? 'var(--warn)' : 'var(--accent)');
+
+  nodeGroup.append('text').attr('dy', '28').attr('text-anchor', 'middle').attr('fill', 'var(--text)')
+    .style('font-size', '9px').style('font-family', "'IBM Plex Mono', monospace")
+    .text(d => d.id.length > 16 ? d.id.slice(0, 14) + '…' : d.id);
+
+  simulation.on('tick', () => {
+    linkLayer.selectAll('.link')
+      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    nodeGroup.attr('transform', d => `translate(${d.x},${d.y})`);
+  });
+
+  document.getElementById('graphInfo').textContent =
+    `${nodes.length} NODES  ·  ${links.length} LINKS  ·  DRAG  ·  SCROLL TO ZOOM`;
+}
+
+function clearGraph() {
+  if (simulation) simulation.stop();
+  linkLayer && linkLayer.selectAll('*').remove();
+  nodeLayer && nodeLayer.selectAll('*').remove();
+}
+
+// ─── UI HELPERS ───
+function showLoading(text, sub) {
+  document.getElementById('loadingText').textContent = text;
+  document.getElementById('loadingSub').textContent = sub || '';
+  document.getElementById('loadingOverlay').classList.add('active');
+}
+
+function hideLoading() {
+  document.getElementById('loadingOverlay').classList.remove('active');
+}
+
+function showToast(msg, type = 'info') {
+  const icons = { success: '✓', error: '✕', info: 'ℹ' };
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.innerHTML = `<span class="toast-icon">${icons[type] || 'ℹ'}</span><span>${escapeHtml(msg)}</span>`;
+  document.getElementById('toastContainer').appendChild(el);
+  setTimeout(() => el.remove(), 4500);
+}
+
+function escapeHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+document.addEventListener('keydown', e => {
+  if (e.ctrlKey && e.key === 'Enter') doPlan();
+  if (e.key === 'Escape') {
+    document.getElementById('connectionsModal').classList.remove('active');
+    document.getElementById('connFormModal').classList.remove('active');
+  }
+});
+</script>
+</body>
+</html>
