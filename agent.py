@@ -196,13 +196,13 @@ class WikiAgent:
         self._stream_callback: Optional[Callable] = None
 
     def _call_ai(self, user_message: str, max_tokens: int = 8096) -> str:
-        response = self.ai.messages.create(
+        with self.ai.messages.stream(
             model='claude-sonnet-4-6',
             max_tokens=max_tokens,
             system=self._system_blocks,
             messages=[{'role': 'user', 'content': user_message}],
-        )
-        return response.content[0].text
+        ) as stream:
+            return stream.get_final_text()
 
     def _build_context_prefix(self, context_pages: list[dict]) -> str:
         if not context_pages:
