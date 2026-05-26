@@ -111,7 +111,9 @@ textarea#prompt::placeholder { color: var(--text3); }
 
 /* PLAN TAB */
 .plan-header { padding: 12px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; background: var(--bg2); }
-.plan-description { font-size: 12px; color: var(--text2); font-family: 'IBM Plex Mono', monospace; line-height: 1.5; margin-bottom: 10px; }
+.plan-description { font-size: 12px; color: var(--text2); font-family: 'IBM Plex Mono', monospace; line-height: 1.5; margin-bottom: 10px; overflow-y: auto; max-height: calc(100vh - 210px); }
+.plan-description::-webkit-scrollbar { width: 4px; }
+.plan-description::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
 .plan-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .plan-empty { padding: 50px 20px; text-align: center; }
 .plan-empty-text { font-family: 'Share Tech Mono', monospace; font-size: 11px; color: var(--text3); letter-spacing: 3px; line-height: 2; text-transform: uppercase; }
