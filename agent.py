@@ -279,7 +279,7 @@ class WikiAgent:
             f"{prefix}INSTRUCTION: {instruction}\n\n"
             f"{GENERATE_SCHEMA}"
         )
-        raw = self._call_ai(prompt, max_tokens=32768)
+        raw = self._call_ai(prompt, max_tokens=64000)
         try:
             data = _extract_json(raw)
         except json.JSONDecodeError:
