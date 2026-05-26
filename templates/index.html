@@ -278,6 +278,28 @@ textarea#prompt::placeholder { color: var(--text3); }
 
 /* Section label */
 .section-label { font-size: 10px; font-family: 'IBM Plex Mono', monospace; color: var(--text3); letter-spacing: 1px; margin-bottom: 5px; text-transform: uppercase; }
+
+/* Plan history sidebar */
+.plan-history-section { border-top: 1px solid var(--border); flex-shrink: 0; display: flex; flex-direction: column; max-height: 260px; }
+.plan-history-header { display: flex; justify-content: space-between; align-items: center; padding: 7px 12px; cursor: pointer; user-select: none; }
+.plan-history-header:hover { background: rgba(255,255,255,0.03); }
+.plan-history-header .section-label { margin-bottom: 0; }
+.plan-history-list { overflow-y: auto; flex: 1; min-height: 0; }
+.plan-history-list::-webkit-scrollbar { width: 3px; }
+.plan-history-list::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+.plan-history-list.locked { opacity: 0.4; pointer-events: none; }
+.plan-item { padding: 7px 12px; border-top: 1px solid var(--border); cursor: pointer; transition: background 0.1s; border-left: 2px solid transparent; }
+.plan-item:hover { background: rgba(0,212,255,0.04); }
+.plan-item.active-plan { border-left-color: var(--accent); background: rgba(0,212,255,0.05); padding-left: 10px; }
+.plan-item-row { display: flex; gap: 5px; align-items: center; margin-bottom: 3px; }
+.plan-op-badge { font-size: 8px; font-family: 'IBM Plex Mono', monospace; color: var(--text3); background: rgba(255,255,255,0.06); padding: 1px 4px; border-radius: 2px; text-transform: uppercase; letter-spacing: 0.5px; }
+.plan-status-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; margin-left: auto; }
+.plan-status-dot.done { background: var(--accent3); }
+.plan-status-dot.partial { background: var(--warn); }
+.plan-status-dot.failed { background: var(--danger); }
+.plan-status-dot.pending { background: var(--text3); }
+.plan-item-desc { font-size: 10px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-item-meta { font-size: 9px; color: var(--text3); font-family: 'IBM Plex Mono', monospace; }
 </style>
 </head>
 <body>
@@ -324,6 +346,17 @@ textarea#prompt::placeholder { color: var(--text3); }
       </div>
       <div class="suggestions" id="suggestions"></div>
       <button class="btn btn-primary" id="planBtn" onclick="doPlan()">⚡ PLAN OPERATION</button>
+    </div>
+
+    <!-- Recent plans history -->
+    <div class="plan-history-section" id="planHistorySection">
+      <div class="plan-history-header" onclick="togglePlanHistory()">
+        <span class="section-label">// RECENT PLANS</span>
+        <span id="planHistoryToggle" style="font-size:9px;color:var(--text3)">▼</span>
+      </div>
+      <div class="plan-history-list" id="planHistoryList" style="display:none">
+        <div style="padding:8px 12px;font-size:10px;color:var(--text3)">Loading...</div>
+      </div>
     </div>
 
     <!-- Legacy page list for generate flow -->
@@ -535,6 +568,7 @@ let _lastSearchResults = [];     // stored so index-based onclick refs work safe
 window.addEventListener('DOMContentLoaded', () => {
   loadConnections();
   initGraph();
+  loadPlanHistory();
   document.getElementById('searchInput').addEventListener('keydown', e => {
     if (e.key === 'Enter') doSearch();
   });
@@ -840,6 +874,7 @@ function loadPlan(data) {
   renderPlanView();
   renderGraph();
   showToast(`Plan ready: ${(data.steps || []).length} steps`, 'success');
+  loadPlanHistory();
 }
 
 function renderPlanView() {
@@ -945,6 +980,8 @@ async function executeApproved() {
   const approvedIds = currentPlan.steps.filter(s => s.status === 'approved').map(s => s.id);
   if (!approvedIds.length) { showToast('No steps approved', 'error'); return; }
 
+  _executionInProgress = true;
+  document.getElementById('planHistoryList').classList.add('locked');
   showLoading('EXECUTING PLAN...', `Writing ${approvedIds.length} pages to wiki`);
 
   try {
@@ -972,14 +1009,102 @@ async function executeApproved() {
     const total = (data.results || []).length;
     showToast(`Executed ${ok}/${total} steps`, ok === total ? 'success' : 'info');
     renderGraph();
+    loadPlanHistory();
   } catch (e) {
     hideLoading();
     showToast('Execute failed: ' + e.message, 'error');
+  } finally {
+    _executionInProgress = false;
+    document.getElementById('planHistoryList').classList.remove('locked');
   }
 }
 
 function findStep(stepId) {
   return currentPlan && currentPlan.steps ? currentPlan.steps.find(s => s.id === stepId) : null;
+}
+
+// ─── PLAN HISTORY ───
+
+let _planHistoryOpen = false;
+let _executionInProgress = false;
+
+function togglePlanHistory() {
+  _planHistoryOpen = !_planHistoryOpen;
+  const list = document.getElementById('planHistoryList');
+  const arrow = document.getElementById('planHistoryToggle');
+  list.style.display = _planHistoryOpen ? '' : 'none';
+  arrow.textContent = _planHistoryOpen ? '▲' : '▼';
+  if (_planHistoryOpen) loadPlanHistory();
+}
+
+async function loadPlanHistory() {
+  try {
+    const res = await fetch(API_BASE + '/api/agent/plans');
+    const data = await res.json();
+    renderPlanHistory(data.plans || []);
+  } catch (e) {
+    if (_planHistoryOpen) {
+      document.getElementById('planHistoryList').innerHTML =
+        '<div style="padding:8px 12px;font-size:10px;color:var(--text3)">Failed to load</div>';
+    }
+  }
+}
+
+function renderPlanHistory(plans) {
+  const list = document.getElementById('planHistoryList');
+  if (!plans.length) {
+    list.innerHTML = '<div style="padding:8px 12px;font-size:10px;color:var(--text3)">No plans yet</div>';
+    return;
+  }
+  const activePlanId = currentPlan ? (currentPlan.plan_id || currentPlan.id) : null;
+  list.innerHTML = '';
+  for (const p of plans) {
+    const el = document.createElement('div');
+    el.className = 'plan-item' + (p.id === activePlanId ? ' active-plan' : '');
+    el.dataset.planId = p.id;
+    const opLabel = (p.operation_type || 'auto').replace(/_/g, ' ');
+    const dateStr = p.created_at ? formatPlanDate(p.created_at) : '';
+    const steps = p.step_count ? `${p.step_count} step${p.step_count !== 1 ? 's' : ''}` : '';
+    el.innerHTML = `
+      <div class="plan-item-row">
+        <span class="plan-op-badge">${escapeHtml(opLabel)}</span>
+        <span class="plan-status-dot ${p.status || 'pending'}"></span>
+      </div>
+      <div class="plan-item-desc" title="${escapeHtml(p.description || '')}">${escapeHtml(p.description || '(no description)')}</div>
+      <div class="plan-item-meta">${dateStr}${steps ? ' · ' + steps : ''}</div>`;
+    el.onclick = () => selectHistoryPlan(p.id);
+    list.appendChild(el);
+  }
+}
+
+function formatPlanDate(isoStr) {
+  try {
+    const d = new Date(isoStr);
+    const diffMs = Date.now() - d;
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMins / 60);
+    const diffDays = Math.floor(diffHours / 24);
+    if (diffMins < 1) return 'just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  } catch (_) {
+    return isoStr.slice(0, 10);
+  }
+}
+
+async function selectHistoryPlan(planId) {
+  if (_executionInProgress) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/agent/plan/${planId}`);
+    const data = await res.json();
+    if (data.error) { showToast('Plan not found', 'error'); return; }
+    if (data.id && !data.plan_id) data.plan_id = data.id;
+    loadPlan(data);
+  } catch (e) {
+    showToast('Error loading plan', 'error');
+  }
 }
 
 // ─── EDITOR ───

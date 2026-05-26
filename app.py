@@ -471,6 +471,28 @@ def get_plan(plan_id: str):
     return jsonify(plan.to_dict())
 
 
+@app.route('/api/agent/plans', methods=['GET'])
+def list_plans():
+    plans = []
+    if PLANS_DIR.exists():
+        for path in PLANS_DIR.glob('*.json'):
+            try:
+                data = json.loads(path.read_text())
+                plans.append({
+                    'id': data.get('id', path.stem),
+                    'operation_type': data.get('operation_type', ''),
+                    'description': data.get('description', ''),
+                    'status': data.get('status', 'pending'),
+                    'step_count': len(data.get('steps', [])),
+                    'created_at': data.get('created_at', ''),
+                    'connection_id': data.get('connection_id', ''),
+                })
+            except Exception:
+                continue
+    plans.sort(key=lambda p: p.get('created_at') or '', reverse=True)
+    return jsonify({'plans': plans})
+
+
 @app.route('/api/agent/execute_step', methods=['POST'])
 def execute_step():
     body = request.json or {}
