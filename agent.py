@@ -126,6 +126,32 @@ def _extract_json(text: str) -> dict:
     return json.loads(text.strip())
 
 
+def _recover_generate_json(text: str) -> dict:
+    """Extract whatever complete steps exist from a truncated generate response."""
+    desc_match = re.search(r'"description"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+    description = desc_match.group(1) if desc_match else 'Plan (response truncated — partial results shown)'
+
+    steps = []
+    steps_match = re.search(r'"steps"\s*:\s*\[', text)
+    if not steps_match:
+        return {'description': description, 'steps': steps}
+
+    decoder = json.JSONDecoder()
+    pos = steps_match.end()
+    while pos < len(text):
+        while pos < len(text) and text[pos] in ' \t\n\r,':
+            pos += 1
+        if pos >= len(text) or text[pos] == ']':
+            break
+        try:
+            obj, pos = decoder.raw_decode(text, pos)
+            steps.append(obj)
+        except json.JSONDecodeError:
+            break
+
+    return {'description': description, 'steps': steps}
+
+
 def _make_diff(old: str, new: str) -> str:
     return '\n'.join(difflib.unified_diff(
         old.splitlines(),
@@ -253,8 +279,11 @@ class WikiAgent:
             f"{prefix}INSTRUCTION: {instruction}\n\n"
             f"{GENERATE_SCHEMA}"
         )
-        raw = self._call_ai(prompt)
-        data = _extract_json(raw)
+        raw = self._call_ai(prompt, max_tokens=32768)
+        try:
+            data = _extract_json(raw)
+        except json.JSONDecodeError:
+            data = _recover_generate_json(raw)
         steps = []
         for s in data.get('steps', []):
             content = s.get('content', '')
