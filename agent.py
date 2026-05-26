@@ -293,7 +293,7 @@ class WikiAgent:
             try:
                 page = self._generate_single_page(title, generated, context_pages)
             except Exception as e:
-                self._emit({'type': 'error', 'message': f'Failed to generate {title}: {e}'})
+                self._emit({'type': 'step_error', 'error': f'Failed to generate {title}: {e}'})
                 continue
             content = page.get('content', '')
             generated[title] = content
@@ -352,7 +352,7 @@ class WikiAgent:
             try:
                 page = self._generate_single_page(title, generated, context_pages)
             except Exception as e:
-                self._emit({'type': 'error', 'message': f'Failed to generate {title}: {e}'})
+                self._emit({'type': 'step_error', 'error': f'Failed to generate {title}: {e}'})
                 continue
 
             content = page.get('content', '')
