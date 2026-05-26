@@ -333,7 +333,10 @@ textarea#prompt::placeholder { color: var(--text3); }
 
   <!-- LEFT PANEL -->
   <div class="left-panel">
-    <div class="panel-header">// OPERATION CONTROL</div>
+    <div class="panel-header" style="display:flex;align-items:center;justify-content:space-between;padding-right:10px">
+      // OPERATION CONTROL
+      <button class="icon-btn" onclick="newOperation()" title="New operation" style="font-size:10px;padding:2px 8px;font-family:'IBM Plex Mono',monospace;letter-spacing:1px">+ NEW</button>
+    </div>
 
     <div class="op-type-row" id="opTypeRow">
       <div class="op-chip active" data-op="auto" onclick="setOpType('auto')">AUTO</div>
@@ -1381,6 +1384,36 @@ function publishAll() {
     showToast(`Published ${ok}/${pages.length} pages`, ok === pages.length ? 'success' : 'info');
   })
   .catch(e => { hideLoading(); showToast('Error: ' + e.message, 'error'); });
+}
+
+function newOperation() {
+  // Reset instruction
+  document.getElementById('prompt').value = '';
+  setOpType('auto');
+
+  // Clear plan state
+  currentPlan = null;
+  document.getElementById('planHeader').style.display = 'none';
+  document.getElementById('planEmpty').style.display = 'block';
+  document.getElementById('stepList').innerHTML = '';
+  document.getElementById('totalSteps').textContent = '0';
+
+  // Clear legacy page list
+  pages = [];
+  selectedIndex = -1;
+  document.getElementById('pageList').style.display = 'none';
+  document.getElementById('listActions').style.display = 'none';
+
+  // Clear graph and close editor
+  clearGraph();
+  document.getElementById('graphEmpty').style.display = 'block';
+  closeEditor();
+
+  // Switch to plan tab and refresh history highlight
+  switchCentreTab('plan');
+  loadPlanHistory();
+
+  document.getElementById('prompt').focus();
 }
 
 function clearAll() {
