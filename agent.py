@@ -150,6 +150,8 @@ def _detect_operation_type(instruction: str) -> str:
         return 'edit_pages'
     if any(k in lower for k in ['audit', 'analyse', 'analyze', 'check all', 'review all', 'list all', 'which pages']):
         return 'audit_pages'
+    if any(k in lower for k in ['copy', 'duplicate', 'clone']):
+        return 'generate_pages'
     return 'generate_pages'
 
 
@@ -179,20 +181,51 @@ class WikiAgent:
     def _build_context_prefix(self, context_pages: list[dict]) -> str:
         if not context_pages:
             return ''
-        lines = ['EXISTING WIKI PAGES FOR CONTEXT:']
-        for p in context_pages[:5]:
-            lines.append(f"=== {p['title']} ===\n{p.get('content', '')}")
+        lines = []
+        referenced = [p for p in context_pages if p.get('is_referenced')]
+        general = [p for p in context_pages if not p.get('is_referenced')]
+
+        if referenced:
+            lines.append('REFERENCED WIKI PAGES (explicitly named in the instruction — use their content as source material):')
+            for p in referenced:
+                lines.append(f"=== {p['title']} ===\n{p.get('content', '')}")
+
+        if general:
+            lines.append('EXISTING WIKI PAGES FOR CONTEXT:')
+            for p in general[:5]:
+                lines.append(f"=== {p['title']} ===\n{p.get('content', '')}")
+
         return '\n\n'.join(lines) + '\n\n---\n\n'
 
     def _emit(self, event: dict):
         if self._stream_callback:
             self._stream_callback(event)
 
+    def _detect_referenced_pages(self, instruction: str) -> list[str]:
+        """Return page titles explicitly named in quotes within the instruction."""
+        matches = re.findall(r'"([^"]+)"|\'([^\']+)\'', instruction)
+        return [title for pair in matches for title in pair if title]
+
     # ── PLAN ──────────────────────────────────────────────────────────────────
 
     def plan(self, instruction: str, operation_type: str | None = None,
              context_pages: list[dict] | None = None) -> OperationPlan:
-        context_pages = context_pages or []
+        context_pages = list(context_pages or [])
+
+        # Auto-fetch pages explicitly referenced by quoted title in the instruction
+        referenced_titles = self._detect_referenced_pages(instruction)
+        if referenced_titles:
+            existing_titles = {p['title'] for p in context_pages}
+            for title in referenced_titles:
+                if title not in existing_titles:
+                    page = self.wiki.get_page(title)
+                    if page.get('exists'):
+                        context_pages.insert(0, {
+                            'title': title,
+                            'content': page.get('content', ''),
+                            'is_referenced': True,
+                        })
+
         if not operation_type or operation_type == 'auto':
             operation_type = _detect_operation_type(instruction)
 
