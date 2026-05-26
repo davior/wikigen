@@ -68,8 +68,9 @@ AUDIT_SCHEMA = """Return a JSON object with this exact structure:
 
 FIND_REPLACE_SCHEMA = """Return a JSON object with this exact structure:
 {
-  "find": "exact string to find",
-  "replace": "replacement string"
+  "replacements": [
+    {"find": "exact string to find", "replace": "replacement string"}
+  ]
 }"""
 
 DISAMBIG_TEMPLATE = "#REDIRECT [[{target}]]\n\n{{{{Redirect}}}}"
@@ -123,7 +124,34 @@ def _extract_json(text: str) -> dict:
     text = text.strip()
     text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
     text = re.sub(r'\s*```$', '', text, flags=re.MULTILINE)
-    return json.loads(text.strip())
+    obj, _ = json.JSONDecoder().raw_decode(text.strip())
+    return obj
+
+
+def _recover_generate_json(text: str) -> dict:
+    """Extract whatever complete steps exist from a truncated generate response."""
+    desc_match = re.search(r'"description"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+    description = desc_match.group(1) if desc_match else 'Plan (response truncated — partial results shown)'
+
+    steps = []
+    steps_match = re.search(r'"steps"\s*:\s*\[', text)
+    if not steps_match:
+        return {'description': description, 'steps': steps}
+
+    decoder = json.JSONDecoder()
+    pos = steps_match.end()
+    while pos < len(text):
+        while pos < len(text) and text[pos] in ' \t\n\r,':
+            pos += 1
+        if pos >= len(text) or text[pos] == ']':
+            break
+        try:
+            obj, pos = decoder.raw_decode(text, pos)
+            steps.append(obj)
+        except json.JSONDecodeError:
+            break
+
+    return {'description': description, 'steps': steps}
 
 
 def _make_diff(old: str, new: str) -> str:
@@ -150,6 +178,8 @@ def _detect_operation_type(instruction: str) -> str:
         return 'edit_pages'
     if any(k in lower for k in ['audit', 'analyse', 'analyze', 'check all', 'review all', 'list all', 'which pages']):
         return 'audit_pages'
+    if any(k in lower for k in ['copy', 'duplicate', 'clone']):
+        return 'generate_pages'
     return 'generate_pages'
 
 
@@ -168,31 +198,62 @@ class WikiAgent:
         self._stream_callback: Optional[Callable] = None
 
     def _call_ai(self, user_message: str, max_tokens: int = 8096) -> str:
-        response = self.ai.messages.create(
+        with self.ai.messages.stream(
             model='claude-sonnet-4-6',
             max_tokens=max_tokens,
             system=self._system_blocks,
             messages=[{'role': 'user', 'content': user_message}],
-        )
-        return response.content[0].text
+        ) as stream:
+            return stream.get_final_text()
 
     def _build_context_prefix(self, context_pages: list[dict]) -> str:
         if not context_pages:
             return ''
-        lines = ['EXISTING WIKI PAGES FOR CONTEXT:']
-        for p in context_pages[:5]:
-            lines.append(f"=== {p['title']} ===\n{p.get('content', '')}")
+        lines = []
+        referenced = [p for p in context_pages if p.get('is_referenced')]
+        general = [p for p in context_pages if not p.get('is_referenced')]
+
+        if referenced:
+            lines.append('REFERENCED WIKI PAGES (explicitly named in the instruction — use their content as source material):')
+            for p in referenced:
+                lines.append(f"=== {p['title']} ===\n{p.get('content', '')}")
+
+        if general:
+            lines.append('EXISTING WIKI PAGES FOR CONTEXT:')
+            for p in general[:5]:
+                lines.append(f"=== {p['title']} ===\n{p.get('content', '')}")
+
         return '\n\n'.join(lines) + '\n\n---\n\n'
 
     def _emit(self, event: dict):
         if self._stream_callback:
             self._stream_callback(event)
 
+    def _detect_referenced_pages(self, instruction: str) -> list[str]:
+        """Return page titles explicitly named in quotes within the instruction."""
+        matches = re.findall(r'"([^"]+)"|\'([^\']+)\'', instruction)
+        return [title for pair in matches for title in pair if title]
+
     # ── PLAN ──────────────────────────────────────────────────────────────────
 
     def plan(self, instruction: str, operation_type: str | None = None,
              context_pages: list[dict] | None = None) -> OperationPlan:
-        context_pages = context_pages or []
+        context_pages = list(context_pages or [])
+
+        # Auto-fetch pages explicitly referenced by quoted title in the instruction
+        referenced_titles = self._detect_referenced_pages(instruction)
+        if referenced_titles:
+            existing_titles = {p['title'] for p in context_pages}
+            for title in referenced_titles:
+                if title not in existing_titles:
+                    page = self.wiki.get_page(title)
+                    if page.get('exists'):
+                        context_pages.insert(0, {
+                            'title': title,
+                            'content': page.get('content', ''),
+                            'is_referenced': True,
+                        })
+
         if not operation_type or operation_type == 'auto':
             operation_type = _detect_operation_type(instruction)
 
@@ -216,26 +277,37 @@ class WikiAgent:
 
     def _plan_generate_pages(self, instruction: str, context_pages: list[dict]) -> tuple[list, str]:
         prefix = self._build_context_prefix(context_pages)
-        prompt = (
-            f"{prefix}INSTRUCTION: {instruction}\n\n"
-            f"{GENERATE_SCHEMA}"
+        # Phase 1: extract page titles with a short call
+        title_prompt = (
+            f"{prefix}From this instruction, list the wiki page titles to generate: {instruction}\n\n"
+            'Return JSON: {"description": "one-sentence summary", "titles": ["Title 1", "Title 2"]}'
         )
-        raw = self._call_ai(prompt)
-        data = _extract_json(raw)
+        title_data = _extract_json(self._call_ai(title_prompt, max_tokens=512))
+        titles = title_data.get('titles', [])
+        description = title_data.get('description', f'Generate pages for: {instruction}')
+
+        # Phase 2: generate each page individually, emitting as we go
+        generated: dict[str, str] = {}
         steps = []
-        for s in data.get('steps', []):
-            content = s.get('content', '')
-            links = s.get('links_to') or self.wiki.extract_links_from_content(content)
+        for title in titles:
+            try:
+                page = self._generate_single_page(title, generated, context_pages)
+            except Exception as e:
+                self._emit({'type': 'error', 'message': f'Failed to generate {title}: {e}'})
+                continue
+            content = page.get('content', '')
+            generated[title] = content
+            links = page.get('links_to') or self.wiki.extract_links_from_content(content)
             step = OperationStep(
                 type='write',
-                title=s['title'],
+                title=title,
                 content=content,
-                summary=s.get('summary', f'Create page: {s["title"]}'),
+                summary=page.get('summary', f'Create page: {title}'),
                 links_to=links,
             )
             steps.append(step)
             self._emit({'type': 'step', 'step': step.to_dict()})
-        return steps, data.get('description', f'Generate pages for: {instruction}')
+        return steps, description
 
     def _generate_single_page(self, title: str, context: dict[str, str],
                                parent_context: list[dict]) -> dict:
@@ -307,35 +379,57 @@ class WikiAgent:
 
     def _plan_find_replace(self, instruction: str, context_pages: list[dict]) -> tuple[list, str]:
         prompt = (
-            f"Extract the find and replace strings from this instruction: {instruction}\n\n"
+            f"Extract all find-and-replace pairs from this instruction: {instruction}\n\n"
             f"{FIND_REPLACE_SCHEMA}"
         )
-        data = _extract_json(self._call_ai(prompt, max_tokens=512))
-        find_term = data['find']
-        replace_term = data['replace']
+        data = _extract_json(self._call_ai(prompt, max_tokens=1024))
+        pairs = data.get('replacements', [])
+        # Back-compat: single-pair response
+        if not pairs and 'find' in data:
+            pairs = [{'find': data['find'], 'replace': data['replace']}]
 
-        results = self.wiki.search(find_term, limit=100)
+        # Collect all affected pages and accumulate all replacements per page
+        page_changes: dict[str, dict] = {}
+        for pair in pairs:
+            find_term, replace_term = pair['find'], pair['replace']
+            for result in self.wiki.search(find_term, limit=100):
+                title = result['title']
+                if title not in page_changes:
+                    page = self.wiki.get_page(title)
+                    if not page.get('content'):
+                        continue
+                    page_changes[title] = {
+                        'original': page['content'],
+                        'current': page['content'],
+                        'summaries': [],
+                    }
+                current = page_changes[title]['current']
+                if find_term not in current:
+                    continue
+                count = current.count(find_term)
+                page_changes[title]['current'] = current.replace(find_term, replace_term)
+                page_changes[title]['summaries'].append(
+                    f'"{find_term}" → "{replace_term}" ({count}×)'
+                )
+
         steps = []
-        for result in results:
-            page = self.wiki.get_page(result['title'])
-            if not page.get('content') or find_term not in page['content']:
+        for title, change in page_changes.items():
+            if change['current'] == change['original']:
                 continue
-            new_content = page['content'].replace(find_term, replace_term)
-            diff = _make_diff(page['content'], new_content)
-            count = page['content'].count(find_term)
+            diff = _make_diff(change['original'], change['current'])
             step = OperationStep(
                 type='replace',
-                title=result['title'],
-                content=new_content,
-                old_content=page['content'],
-                summary=f'Find/replace: "{find_term}" → "{replace_term}" ({count} occurrence{"s" if count != 1 else ""})',
+                title=title,
+                content=change['current'],
+                old_content=change['original'],
+                summary='Find/replace: ' + '; '.join(change['summaries']),
                 diff=diff,
             )
             steps.append(step)
             self._emit({'type': 'step', 'step': step.to_dict()})
 
-        desc = f'Replace "{find_term}" → "{replace_term}" across {len(steps)} pages'
-        return steps, desc
+        desc_parts = [f'"{p["find"]}" → "{p["replace"]}"' for p in pairs]
+        return steps, f'Replace {", ".join(desc_parts)} across {len(steps)} pages'
 
     def _plan_ensure_disambig(self, instruction: str, context_pages: list[dict]) -> tuple[list, str]:
         abbr_pattern = re.findall(r'\b([A-Z]{2,8}(?:s)?)\b', instruction)
