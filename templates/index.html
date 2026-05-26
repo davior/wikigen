@@ -284,24 +284,32 @@ textarea#prompt::placeholder { color: var(--text3); }
 .section-label { font-size: 10px; font-family: 'IBM Plex Mono', monospace; color: var(--text3); letter-spacing: 1px; margin-bottom: 5px; text-transform: uppercase; }
 
 /* Plan history sidebar */
-.plan-history-section { border-top: 1px solid var(--border); flex-shrink: 0; display: flex; flex-direction: column; max-height: 260px; }
-.plan-history-header { display: flex; justify-content: space-between; align-items: center; padding: 7px 12px; cursor: pointer; user-select: none; }
+.plan-history-section { border-top: 1px solid var(--border); flex: 0 0 auto; display: flex; flex-direction: column; overflow: hidden; }
+.plan-history-section.ph-expanded { flex: 1; min-height: 0; }
+.plan-history-header { display: flex; align-items: center; gap: 6px; padding: 7px 12px; cursor: pointer; user-select: none; flex-shrink: 0; }
 .plan-history-header:hover { background: rgba(255,255,255,0.03); }
-.plan-history-header .section-label { margin-bottom: 0; }
+.plan-history-header .section-label { margin-bottom: 0; flex: 1; }
+.plan-archived-toggle { font-size: 8px; font-family: 'IBM Plex Mono', monospace; color: var(--text3); background: none; border: 1px solid transparent; padding: 1px 5px; border-radius: 2px; cursor: pointer; letter-spacing: 0.5px; white-space: nowrap; }
+.plan-archived-toggle:hover { color: var(--text); border-color: var(--border2); }
+.plan-archived-toggle.active { color: var(--warn); border-color: rgba(255,170,0,0.3); }
 .plan-history-list { overflow-y: auto; flex: 1; min-height: 0; }
 .plan-history-list::-webkit-scrollbar { width: 3px; }
 .plan-history-list::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
 .plan-history-list.locked { opacity: 0.4; pointer-events: none; }
-.plan-item { padding: 7px 12px; border-top: 1px solid var(--border); cursor: pointer; transition: background 0.1s; border-left: 2px solid transparent; }
+.plan-item { padding: 7px 12px; border-top: 1px solid var(--border); cursor: pointer; transition: background 0.1s; border-left: 2px solid transparent; position: relative; }
 .plan-item:hover { background: rgba(0,212,255,0.04); }
 .plan-item.active-plan { border-left-color: var(--accent); background: rgba(0,212,255,0.05); padding-left: 10px; }
+.plan-item.plan-archived { opacity: 0.45; }
 .plan-item-row { display: flex; gap: 5px; align-items: center; margin-bottom: 3px; }
 .plan-op-badge { font-size: 8px; font-family: 'IBM Plex Mono', monospace; color: var(--text3); background: rgba(255,255,255,0.06); padding: 1px 4px; border-radius: 2px; text-transform: uppercase; letter-spacing: 0.5px; }
-.plan-status-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; margin-left: auto; }
+.plan-status-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
 .plan-status-dot.done { background: var(--accent3); }
 .plan-status-dot.partial { background: var(--warn); }
 .plan-status-dot.failed { background: var(--danger); }
 .plan-status-dot.pending { background: var(--text3); }
+.plan-archive-btn { background: none; border: none; color: var(--text3); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 0 0 4px; flex-shrink: 0; opacity: 0; transition: opacity 0.1s, color 0.1s; margin-left: auto; }
+.plan-item:hover .plan-archive-btn { opacity: 1; }
+.plan-archive-btn:hover { color: var(--danger); }
 .plan-item-desc { font-size: 10px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .plan-item-meta { font-size: 9px; color: var(--text3); font-family: 'IBM Plex Mono', monospace; }
 </style>
@@ -353,12 +361,13 @@ textarea#prompt::placeholder { color: var(--text3); }
     </div>
 
     <!-- Recent plans history -->
-    <div class="plan-history-section" id="planHistorySection">
+    <div class="plan-history-section ph-expanded" id="planHistorySection">
       <div class="plan-history-header" onclick="togglePlanHistory()">
         <span class="section-label">// RECENT PLANS</span>
-        <span id="planHistoryToggle" style="font-size:9px;color:var(--text3)">▼</span>
+        <button class="plan-archived-toggle" id="planArchivedToggle" onclick="event.stopPropagation(); toggleShowArchived()" title="Show / hide archived plans">ARCHIVED</button>
+        <span id="planHistoryToggle" style="font-size:9px;color:var(--text3)">▲</span>
       </div>
-      <div class="plan-history-list" id="planHistoryList" style="display:none">
+      <div class="plan-history-list" id="planHistoryList">
         <div style="padding:8px 12px;font-size:10px;color:var(--text3)">Loading...</div>
       </div>
     </div>
@@ -1066,21 +1075,32 @@ function findStep(stepId) {
 
 // ─── PLAN HISTORY ───
 
-let _planHistoryOpen = false;
+let _planHistoryOpen = true;
+let _showArchived = false;
 let _executionInProgress = false;
 
 function togglePlanHistory() {
   _planHistoryOpen = !_planHistoryOpen;
+  const section = document.getElementById('planHistorySection');
   const list = document.getElementById('planHistoryList');
   const arrow = document.getElementById('planHistoryToggle');
+  section.classList.toggle('ph-expanded', _planHistoryOpen);
   list.style.display = _planHistoryOpen ? '' : 'none';
   arrow.textContent = _planHistoryOpen ? '▲' : '▼';
   if (_planHistoryOpen) loadPlanHistory();
 }
 
+function toggleShowArchived() {
+  _showArchived = !_showArchived;
+  const btn = document.getElementById('planArchivedToggle');
+  btn.classList.toggle('active', _showArchived);
+  loadPlanHistory();
+}
+
 async function loadPlanHistory() {
   try {
-    const res = await fetch(API_BASE + '/api/agent/plans');
+    const url = API_BASE + '/api/agent/plans' + (_showArchived ? '?show_archived=1' : '');
+    const res = await fetch(url);
     const data = await res.json();
     renderPlanHistory(data.plans || []);
   } catch (e) {
@@ -1094,14 +1114,17 @@ async function loadPlanHistory() {
 function renderPlanHistory(plans) {
   const list = document.getElementById('planHistoryList');
   if (!plans.length) {
-    list.innerHTML = '<div style="padding:8px 12px;font-size:10px;color:var(--text3)">No plans yet</div>';
+    list.innerHTML = `<div style="padding:8px 12px;font-size:10px;color:var(--text3)">${_showArchived ? 'No plans' : 'No plans yet'}</div>`;
     return;
   }
   const activePlanId = currentPlan ? (currentPlan.plan_id || currentPlan.id) : null;
   list.innerHTML = '';
   for (const p of plans) {
     const el = document.createElement('div');
-    el.className = 'plan-item' + (p.id === activePlanId ? ' active-plan' : '');
+    let cls = 'plan-item';
+    if (p.id === activePlanId) cls += ' active-plan';
+    if (p.archived) cls += ' plan-archived';
+    el.className = cls;
     el.dataset.planId = p.id;
     const opLabel = (p.operation_type || 'auto').replace(/_/g, ' ');
     const dateStr = p.created_at ? formatPlanDate(p.created_at) : '';
@@ -1110,11 +1133,27 @@ function renderPlanHistory(plans) {
       <div class="plan-item-row">
         <span class="plan-op-badge">${escapeHtml(opLabel)}</span>
         <span class="plan-status-dot ${p.status || 'pending'}"></span>
+        <button class="plan-archive-btn" title="${p.archived ? 'Already archived' : 'Archive plan'}">×</button>
       </div>
       <div class="plan-item-desc" title="${escapeHtml(p.description || '')}">${escapeHtml(p.description || '(no description)')}</div>
       <div class="plan-item-meta">${dateStr}${steps ? ' · ' + steps : ''}</div>`;
-    el.onclick = () => selectHistoryPlan(p.id);
+    el.querySelector('.plan-archive-btn').addEventListener('click', e => {
+      e.stopPropagation();
+      if (!p.archived) archivePlan(p.id, p.description || 'this plan');
+    });
+    el.addEventListener('click', () => selectHistoryPlan(p.id));
     list.appendChild(el);
+  }
+}
+
+async function archivePlan(planId, description) {
+  const confirmed = confirm(`Archive "${description.slice(0, 60)}"?\n\nIt will be hidden from the list. Use "ARCHIVED" toggle to view it again.`);
+  if (!confirmed) return;
+  try {
+    await fetch(`${API_BASE}/api/agent/plans/${planId}/archive`, { method: 'POST' });
+    loadPlanHistory();
+  } catch (e) {
+    showToast('Failed to archive plan', 'error');
   }
 }
 
