@@ -26,6 +26,7 @@ CONNECTIONS_FILE = DATA_DIR / 'connections.json'
 HISTORY_FILE = DATA_DIR / 'history.json'
 PLANS_DIR = DATA_DIR / 'plans'
 PLANS_DIR.mkdir(exist_ok=True)
+ARCHIVED_PLANS_FILE = DATA_DIR / 'archived_plans.json'
 
 anthropic_client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY', ''))
 
@@ -469,6 +470,56 @@ def get_plan(plan_id: str):
             return jsonify(json.loads(path.read_text()))
         return jsonify({'error': 'Plan not found'}), 404
     return jsonify(plan.to_dict())
+
+
+def _load_archived_ids() -> set:
+    if ARCHIVED_PLANS_FILE.exists():
+        try:
+            return set(json.loads(ARCHIVED_PLANS_FILE.read_text()))
+        except Exception:
+            pass
+    return set()
+
+
+def _save_archived_ids(ids: set):
+    ARCHIVED_PLANS_FILE.write_text(json.dumps(sorted(ids), indent=2))
+
+
+@app.route('/api/agent/plans', methods=['GET'])
+def list_plans():
+    show_archived = request.args.get('show_archived', '0') == '1'
+    archived_ids = _load_archived_ids()
+    plans = []
+    if PLANS_DIR.exists():
+        for path in PLANS_DIR.glob('*.json'):
+            try:
+                data = json.loads(path.read_text())
+                plan_id = data.get('id', path.stem)
+                is_archived = plan_id in archived_ids
+                if not show_archived and is_archived:
+                    continue
+                plans.append({
+                    'id': plan_id,
+                    'operation_type': data.get('operation_type', ''),
+                    'description': data.get('description', ''),
+                    'status': data.get('status', 'pending'),
+                    'step_count': len(data.get('steps', [])),
+                    'created_at': data.get('created_at', ''),
+                    'connection_id': data.get('connection_id', ''),
+                    'archived': is_archived,
+                })
+            except Exception:
+                continue
+    plans.sort(key=lambda p: p.get('created_at') or '', reverse=True)
+    return jsonify({'plans': plans})
+
+
+@app.route('/api/agent/plans/<plan_id>/archive', methods=['POST'])
+def archive_plan(plan_id: str):
+    ids = _load_archived_ids()
+    ids.add(plan_id)
+    _save_archived_ids(ids)
+    return jsonify({'success': True})
 
 
 @app.route('/api/agent/execute_step', methods=['POST'])
