@@ -68,8 +68,9 @@ AUDIT_SCHEMA = """Return a JSON object with this exact structure:
 
 FIND_REPLACE_SCHEMA = """Return a JSON object with this exact structure:
 {
-  "find": "exact string to find",
-  "replace": "replacement string"
+  "replacements": [
+    {"find": "exact string to find", "replace": "replacement string"}
+  ]
 }"""
 
 DISAMBIG_TEMPLATE = "#REDIRECT [[{target}]]\n\n{{{{Redirect}}}}"
@@ -123,7 +124,8 @@ def _extract_json(text: str) -> dict:
     text = text.strip()
     text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
     text = re.sub(r'\s*```$', '', text, flags=re.MULTILINE)
-    return json.loads(text.strip())
+    obj, _ = json.JSONDecoder().raw_decode(text.strip())
+    return obj
 
 
 def _recover_generate_json(text: str) -> dict:
@@ -377,35 +379,57 @@ class WikiAgent:
 
     def _plan_find_replace(self, instruction: str, context_pages: list[dict]) -> tuple[list, str]:
         prompt = (
-            f"Extract the find and replace strings from this instruction: {instruction}\n\n"
+            f"Extract all find-and-replace pairs from this instruction: {instruction}\n\n"
             f"{FIND_REPLACE_SCHEMA}"
         )
-        data = _extract_json(self._call_ai(prompt, max_tokens=512))
-        find_term = data['find']
-        replace_term = data['replace']
+        data = _extract_json(self._call_ai(prompt, max_tokens=1024))
+        pairs = data.get('replacements', [])
+        # Back-compat: single-pair response
+        if not pairs and 'find' in data:
+            pairs = [{'find': data['find'], 'replace': data['replace']}]
 
-        results = self.wiki.search(find_term, limit=100)
+        # Collect all affected pages and accumulate all replacements per page
+        page_changes: dict[str, dict] = {}
+        for pair in pairs:
+            find_term, replace_term = pair['find'], pair['replace']
+            for result in self.wiki.search(find_term, limit=100):
+                title = result['title']
+                if title not in page_changes:
+                    page = self.wiki.get_page(title)
+                    if not page.get('content'):
+                        continue
+                    page_changes[title] = {
+                        'original': page['content'],
+                        'current': page['content'],
+                        'summaries': [],
+                    }
+                current = page_changes[title]['current']
+                if find_term not in current:
+                    continue
+                count = current.count(find_term)
+                page_changes[title]['current'] = current.replace(find_term, replace_term)
+                page_changes[title]['summaries'].append(
+                    f'"{find_term}" → "{replace_term}" ({count}×)'
+                )
+
         steps = []
-        for result in results:
-            page = self.wiki.get_page(result['title'])
-            if not page.get('content') or find_term not in page['content']:
+        for title, change in page_changes.items():
+            if change['current'] == change['original']:
                 continue
-            new_content = page['content'].replace(find_term, replace_term)
-            diff = _make_diff(page['content'], new_content)
-            count = page['content'].count(find_term)
+            diff = _make_diff(change['original'], change['current'])
             step = OperationStep(
                 type='replace',
-                title=result['title'],
-                content=new_content,
-                old_content=page['content'],
-                summary=f'Find/replace: "{find_term}" → "{replace_term}" ({count} occurrence{"s" if count != 1 else ""})',
+                title=title,
+                content=change['current'],
+                old_content=change['original'],
+                summary='Find/replace: ' + '; '.join(change['summaries']),
                 diff=diff,
             )
             steps.append(step)
             self._emit({'type': 'step', 'step': step.to_dict()})
 
-        desc = f'Replace "{find_term}" → "{replace_term}" across {len(steps)} pages'
-        return steps, desc
+        desc_parts = [f'"{p["find"]}" → "{p["replace"]}"' for p in pairs]
+        return steps, f'Replace {", ".join(desc_parts)} across {len(steps)} pages'
 
     def _plan_ensure_disambig(self, instruction: str, context_pages: list[dict]) -> tuple[list, str]:
         abbr_pattern = re.findall(r'\b([A-Z]{2,8}(?:s)?)\b', instruction)
