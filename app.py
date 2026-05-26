@@ -370,15 +370,15 @@ def agent_plan():
     operation_type = body.get('operation_type', 'auto')
     context_pages = body.get('context_pages', [])
 
-    # Recursive generation uses SSE; start a background job
-    if operation_type == 'generate_recursive':
+    # Streaming operation types: use background thread + SSE
+    if operation_type in ('generate_recursive', 'generate_pages'):
         plan_id = str(uuid.uuid4())
         job_q: queue.Queue = queue.Queue()
         _job_queues[plan_id] = job_q
 
         placeholder = OperationPlan(
             id=plan_id,
-            operation_type='generate_recursive',
+            operation_type=operation_type,
             description='Planning in progress…',
             connection_id=conn['id'],
             status='running',
@@ -389,7 +389,7 @@ def agent_plan():
             agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'])
             agent._stream_callback = lambda evt: job_q.put(evt)
             try:
-                plan = agent.plan(instruction, 'generate_recursive', context_pages)
+                plan = agent.plan(instruction, operation_type, context_pages)
                 plan.id = plan_id
                 _plans[plan_id] = plan
                 _save_plan_to_disk(plan)
@@ -397,7 +397,7 @@ def agent_plan():
                 job_q.put({'type': 'error', 'error': str(e)})
 
         threading.Thread(target=_worker, daemon=True).start()
-        return jsonify({'plan_id': plan_id, 'status': 'running', 'operation_type': 'generate_recursive'})
+        return jsonify({'plan_id': plan_id, 'status': 'running', 'operation_type': operation_type})
 
     # All other types: blocking
     agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'])

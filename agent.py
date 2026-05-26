@@ -275,29 +275,37 @@ class WikiAgent:
 
     def _plan_generate_pages(self, instruction: str, context_pages: list[dict]) -> tuple[list, str]:
         prefix = self._build_context_prefix(context_pages)
-        prompt = (
-            f"{prefix}INSTRUCTION: {instruction}\n\n"
-            f"{GENERATE_SCHEMA}"
+        # Phase 1: extract page titles with a short call
+        title_prompt = (
+            f"{prefix}From this instruction, list the wiki page titles to generate: {instruction}\n\n"
+            'Return JSON: {"description": "one-sentence summary", "titles": ["Title 1", "Title 2"]}'
         )
-        raw = self._call_ai(prompt, max_tokens=64000)
-        try:
-            data = _extract_json(raw)
-        except json.JSONDecodeError:
-            data = _recover_generate_json(raw)
+        title_data = _extract_json(self._call_ai(title_prompt, max_tokens=512))
+        titles = title_data.get('titles', [])
+        description = title_data.get('description', f'Generate pages for: {instruction}')
+
+        # Phase 2: generate each page individually, emitting as we go
+        generated: dict[str, str] = {}
         steps = []
-        for s in data.get('steps', []):
-            content = s.get('content', '')
-            links = s.get('links_to') or self.wiki.extract_links_from_content(content)
+        for title in titles:
+            try:
+                page = self._generate_single_page(title, generated, context_pages)
+            except Exception as e:
+                self._emit({'type': 'error', 'message': f'Failed to generate {title}: {e}'})
+                continue
+            content = page.get('content', '')
+            generated[title] = content
+            links = page.get('links_to') or self.wiki.extract_links_from_content(content)
             step = OperationStep(
                 type='write',
-                title=s['title'],
+                title=title,
                 content=content,
-                summary=s.get('summary', f'Create page: {s["title"]}'),
+                summary=page.get('summary', f'Create page: {title}'),
                 links_to=links,
             )
             steps.append(step)
             self._emit({'type': 'step', 'step': step.to_dict()})
-        return steps, data.get('description', f'Generate pages for: {instruction}')
+        return steps, description
 
     def _generate_single_page(self, title: str, context: dict[str, str],
                                parent_context: list[dict]) -> dict:

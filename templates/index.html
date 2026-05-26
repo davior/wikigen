@@ -756,8 +756,8 @@ async function doPlan() {
   const planBtn = document.getElementById('planBtn');
   planBtn.disabled = true;
 
-  if (activeOpType === 'generate_recursive') {
-    await planRecursive(instruction);
+  if (activeOpType === 'generate_recursive' || activeOpType === 'generate_pages') {
+    await planWithStream(instruction, activeOpType);
   } else {
     showLoading('PLANNING OPERATION...', 'Calling Anthropic API');
     try {
@@ -774,7 +774,12 @@ async function doPlan() {
       const data = await resp.json();
       hideLoading();
       if (data.error) { showToast('Error: ' + data.error, 'error'); planBtn.disabled = false; return; }
-      loadPlan(data);
+      // Server may have resolved 'auto' to a streaming op type
+      if (data.status === 'running') {
+        await streamExistingPlan(data.plan_id, data.operation_type);
+      } else {
+        loadPlan(data);
+      }
     } catch (e) {
       hideLoading();
       showToast('Request failed: ' + e.message, 'error');
@@ -783,16 +788,47 @@ async function doPlan() {
   planBtn.disabled = false;
 }
 
-async function planRecursive(instruction) {
-  showLoading('STARTING RECURSIVE PLANNING...', 'This may take several minutes');
+async function streamExistingPlan(planId, operationType) {
+  currentPlan = { plan_id: planId, operation_type: operationType, description: 'Planning in progress...', steps: [] };
+  switchCentreTab('plan');
+  renderPlanView();
+  return new Promise((resolve) => {
+    const es = new EventSource(`${API_BASE}/api/agent/plan/stream/${planId}`);
+    es.onmessage = (e) => {
+      const event = JSON.parse(e.data);
+      if (event.type === 'step') {
+        if (!currentPlan.steps) currentPlan.steps = [];
+        currentPlan.steps.push(event.step);
+        document.getElementById('totalSteps').textContent = currentPlan.steps.length;
+        appendStepToView(event.step);
+        renderGraph();
+      } else if (event.type === 'plan_complete') {
+        currentPlan.description = event.description;
+        currentPlan.steps = event.steps;
+        renderPlanView();
+        showToast(`Plan complete: ${event.steps.length} pages`, 'success');
+        es.close();
+        resolve();
+      } else if (event.type === 'error') {
+        showToast('Streaming error: ' + event.error, 'error');
+        es.close();
+        resolve();
+      }
+    };
+    es.onerror = () => { es.close(); resolve(); };
+  });
+}
 
-  // Initiate job
+async function planWithStream(instruction, operationType) {
+  const label = operationType === 'generate_recursive' ? 'RECURSIVE PLANNING' : 'GENERATING PAGES';
+  showLoading(`STARTING ${label}...`, 'This may take several minutes');
+
   const resp = await fetch(API_BASE + '/api/agent/plan', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       instruction,
-      operation_type: 'generate_recursive',
+      operation_type: operationType,
       context_pages: contextPages,
       connection_id: activeConnectionId,
     }),
@@ -801,7 +837,7 @@ async function planRecursive(instruction) {
   if (data.error) { hideLoading(); showToast('Error: ' + data.error, 'error'); return; }
 
   const planId = data.plan_id;
-  currentPlan = { plan_id: planId, operation_type: 'generate_recursive', description: 'Planning in progress...', steps: [] };
+  currentPlan = { plan_id: planId, operation_type: operationType, description: 'Planning in progress...', steps: [] };
   hideLoading();
   switchCentreTab('plan');
   renderPlanView();
@@ -821,7 +857,7 @@ async function planRecursive(instruction) {
         currentPlan.description = event.description;
         currentPlan.steps = event.steps;
         renderPlanView();
-        showToast(`Recursive plan complete: ${event.steps.length} pages`, 'success');
+        showToast(`Plan complete: ${event.steps.length} pages`, 'success');
         es.close();
         resolve();
       } else if (event.type === 'error') {
