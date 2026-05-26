@@ -181,7 +181,7 @@ def update_connection(conn_id: str):
     data = _load_connections()
     for conn in data['connections']:
         if conn['id'] == conn_id:
-            conn.update({k: v for k, v in body.items() if k != 'id'})
+            conn.update({k: v for k, v in body.items() if k != 'id' and not (k == 'password' and not v)})
             _wiki_clients.pop(conn_id, None)
             _save_connections(data)
             return jsonify({'success': True, 'connection': conn})

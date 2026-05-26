@@ -493,7 +493,7 @@ textarea#prompt::placeholder { color: var(--text3); }
       </div>
       <div class="form-group">
         <label class="form-label">Password</label>
-        <input class="form-input" type="password" id="connFormPassword">
+        <input class="form-input" type="password" id="connFormPassword" placeholder="Leave blank to keep existing password">
       </div>
       <div class="form-group">
         <label class="form-label">System Prompt (wiki context for AI)</label>
@@ -673,10 +673,11 @@ function saveConnection() {
     name: document.getElementById('connFormName').value,
     wiki_url: document.getElementById('connFormUrl').value,
     username: document.getElementById('connFormUsername').value,
-    password: document.getElementById('connFormPassword').value,
     system_prompt: document.getElementById('connFormSystemPrompt').value,
     chips: document.getElementById('connFormChips').value.split(',').map(s => s.trim()).filter(Boolean),
   };
+  const password = document.getElementById('connFormPassword').value;
+  if (password) body.password = password;
   const url = id ? `${API_BASE}/api/connections/${id}` : API_BASE + '/api/connections';
   const method = id ? 'PUT' : 'POST';
   fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
