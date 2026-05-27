@@ -340,7 +340,7 @@ class WikiAgent:
         )
         prompt = '\n\n'.join(parts)
 
-        raw = self._call_ai(prompt, max_tokens=16384)
+        raw = self._call_ai(prompt, max_tokens=64000)
         try:
             return _extract_json(raw)
         except (json.JSONDecodeError, ValueError):
