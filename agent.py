@@ -128,6 +128,17 @@ def _extract_json(text: str) -> dict:
     return obj
 
 
+def _recover_page_json(text: str, title: str) -> dict:
+    """Extract a page dict from a response whose JSON was truncated by the token limit."""
+    content_match = re.search(r'"content"\s*:\s*"((?:[^"\\]|\\.)*)', text)
+    content = content_match.group(1) if content_match else ''
+    content = content.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
+    summary_match = re.search(r'"summary"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+    summary = summary_match.group(1) if summary_match else f'Create page: {title} (truncated)'
+    links = list(dict.fromkeys(re.findall(r'\[\[([^\]|#]+)', content)))
+    return {'title': title, 'content': content, 'summary': summary, 'links_to': links}
+
+
 def _recover_generate_json(text: str) -> dict:
     """Extract whatever complete steps exist from a truncated generate response."""
     desc_match = re.search(r'"description"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
@@ -293,7 +304,7 @@ class WikiAgent:
             try:
                 page = self._generate_single_page(title, generated, context_pages)
             except Exception as e:
-                self._emit({'type': 'error', 'message': f'Failed to generate {title}: {e}'})
+                self._emit({'type': 'step_error', 'error': f'Failed to generate {title}: {e}'})
                 continue
             content = page.get('content', '')
             generated[title] = content
@@ -329,8 +340,11 @@ class WikiAgent:
         )
         prompt = '\n\n'.join(parts)
 
-        raw = self._call_ai(prompt, max_tokens=4096)
-        return _extract_json(raw)
+        raw = self._call_ai(prompt, max_tokens=64000)
+        try:
+            return _extract_json(raw)
+        except (json.JSONDecodeError, ValueError):
+            return _recover_page_json(raw, title)
 
     def _plan_generate_recursive(self, instruction: str, context_pages: list[dict],
                                   max_depth: int = 2, max_pages: int = 20) -> tuple[list, str]:
@@ -352,7 +366,7 @@ class WikiAgent:
             try:
                 page = self._generate_single_page(title, generated, context_pages)
             except Exception as e:
-                self._emit({'type': 'error', 'message': f'Failed to generate {title}: {e}'})
+                self._emit({'type': 'step_error', 'error': f'Failed to generate {title}: {e}'})
                 continue
 
             content = page.get('content', '')
