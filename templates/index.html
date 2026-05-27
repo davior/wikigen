@@ -137,6 +137,7 @@ textarea#prompt::placeholder { color: var(--text3); }
 .badge-move { background: #9b59b6; color: white; }
 .badge-delete { background: var(--danger); color: white; }
 .badge-replace { background: var(--accent2); color: var(--bg); }
+.badge-image { background: #27ae60; color: white; }
 .step-title { flex: 1; font-size: 13px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .step-status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .step-status-dot.pending { background: var(--text3); }
@@ -153,6 +154,8 @@ textarea#prompt::placeholder { color: var(--text3); }
 .step-btn-reject:hover { background: var(--danger); color: white; }
 .step-summary { padding: 0 11px 9px; font-size: 10px; color: var(--text2); font-family: 'IBM Plex Mono', monospace; line-height: 1.4; }
 .step-error { padding: 5px 11px; font-size: 10px; color: var(--danger); font-family: 'IBM Plex Mono', monospace; }
+.step-image-thumb { padding: 5px 11px 7px; }
+.step-image-thumb img { max-width: 100%; max-height: 120px; border-radius: 3px; border: 1px solid var(--border2); display: block; }
 
 /* GRAPH TAB */
 .graph-panel { flex: 1; position: relative; overflow: hidden; }
@@ -211,6 +214,9 @@ textarea#prompt::placeholder { color: var(--text3); }
 .wiki-preview a:hover { text-decoration: underline; }
 .wiki-preview .wikilink { color: var(--accent2); }
 .wiki-preview .category { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--text3); margin-top: 14px; padding-top: 9px; border-top: 1px solid var(--border); }
+.wiki-preview figure.wiki-image { float: right; clear: right; margin: 0 0 10px 12px; max-width: 200px; border: 1px solid var(--border2); border-radius: 3px; padding: 4px; background: var(--bg3); }
+.wiki-preview figure.wiki-image img { max-width: 100%; display: block; border-radius: 2px; }
+.wiki-preview figure.wiki-image figcaption { font-size: 10px; color: var(--text3); margin-top: 4px; font-family: 'IBM Plex Mono', monospace; line-height: 1.4; }
 .links-preview { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
 .link-chip { font-size: 10px; font-family: 'IBM Plex Mono', monospace; padding: 3px 7px; background: var(--bg4); border: 1px solid var(--border2); border-radius: 2px; color: var(--accent2); }
 
@@ -348,6 +354,7 @@ textarea#prompt::placeholder { color: var(--text3); }
       <div class="op-chip" data-op="ensure_disambig" onclick="setOpType('ensure_disambig')">DISAMBIG</div>
       <div class="op-chip" data-op="rename_pages" onclick="setOpType('rename_pages')">RENAME</div>
       <div class="op-chip" data-op="audit_pages" onclick="setOpType('audit_pages')">AUDIT</div>
+      <div class="op-chip" data-op="source_images" onclick="setOpType('source_images')">IMAGES</div>
     </div>
 
     <div class="prompt-area">
@@ -977,8 +984,15 @@ function buildStepElement(step) {
   div.className = `step-item ${step.status}`;
   div.id = `step-${step.id}`;
 
-  const badgeClass = { write: 'badge-write', edit: 'badge-edit', move: 'badge-move', delete: 'badge-delete', replace: 'badge-replace' }[step.type] || 'badge-write';
-  const badgeLabel = step.type.toUpperCase();
+  const badgeClass = { write: 'badge-write', edit: 'badge-edit', move: 'badge-move', delete: 'badge-delete', replace: 'badge-replace', add_image: 'badge-image' }[step.type] || 'badge-write';
+  const badgeLabel = step.type === 'add_image' ? 'IMAGE' : step.type.toUpperCase();
+
+  let imageThumbHtml = '';
+  if (step.type === 'add_image' && step.image_file) {
+    const thumbSrc = `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(step.image_file)}?width=400`;
+    const commonsLink = step.commons_url ? ` data-commons="${escapeHtml(step.commons_url)}"` : '';
+    imageThumbHtml = `<div class="step-image-thumb"${commonsLink}><img src="${thumbSrc}" alt="${escapeHtml(step.image_file)}" onerror="this.parentElement.style.display='none'"></div>`;
+  }
 
   div.innerHTML = `
     <div class="step-header">
@@ -991,6 +1005,7 @@ function buildStepElement(step) {
       </div>
     </div>
     <div class="step-summary">${escapeHtml(step.summary || '')}</div>
+    ${imageThumbHtml}
     ${step.error ? `<div class="step-error">✕ ${escapeHtml(step.error)}</div>` : ''}
   `;
 
@@ -1268,6 +1283,13 @@ function renderPreview(markup) {
     .replace(/'''(.*?)'''/g, '<strong>$1</strong>')
     .replace(/''(.*?)''/g, '<em>$1</em>')
     .replace(/\[\[Category:(.*?)\]\]/g, '<span class="category">Category: $1</span>')
+    .replace(/\[\[(?:File|Image):(.*?)\]\]/gi, (m, p1) => {
+      const parts = p1.split('|');
+      const filename = parts[0].trim();
+      const caption = parts[parts.length - 1].trim();
+      const thumbSrc = `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(filename)}?width=200`;
+      return `<figure class="wiki-image"><img src="${thumbSrc}" alt="${escapeHtml(caption)}" onerror="this.parentElement.style.display='none'"><figcaption>${escapeHtml(caption)}</figcaption></figure>`;
+    })
     .replace(/\[\[(.*?)\]\]/g, (m, p1) => {
       const parts = p1.split('|');
       const label = parts[1] || parts[0];

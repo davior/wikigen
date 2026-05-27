@@ -235,6 +235,47 @@ class WikiClient:
                 result.append(link)
         return result
 
+    @staticmethod
+    def search_commons_images(query: str, limit: int = 5) -> list[dict]:
+        """Search Wikimedia Commons for images. Returns list of {filename, thumb_url, commons_url}."""
+        headers = {'User-Agent': 'WikiGen/3.0 (wiki management bot; https://github.com/davior/wikigen)'}
+        api = 'https://commons.wikimedia.org/w/api.php'
+        r = requests.get(api, params={
+            'action': 'query',
+            'list': 'search',
+            'srnamespace': 6,
+            'srsearch': query,
+            'srlimit': limit,
+            'format': 'json',
+        }, headers=headers, timeout=10)
+        r.raise_for_status()
+        file_titles = [s['title'] for s in r.json().get('query', {}).get('search', [])]
+        if not file_titles:
+            return []
+
+        ir = requests.get(api, params={
+            'action': 'query',
+            'titles': '|'.join(file_titles),
+            'prop': 'imageinfo',
+            'iiprop': 'url',
+            'iiurlwidth': 300,
+            'format': 'json',
+        }, headers=headers, timeout=10)
+        ir.raise_for_status()
+
+        images = []
+        for page in ir.json().get('query', {}).get('pages', {}).values():
+            if 'imageinfo' not in page:
+                continue
+            info = page['imageinfo'][0]
+            filename = page['title'][5:]  # strip "File:"
+            images.append({
+                'filename': filename,
+                'thumb_url': info.get('thumburl', ''),
+                'commons_url': f"https://commons.wikimedia.org/wiki/File:{requests.utils.quote(filename, safe='')}",
+            })
+        return images
+
 
 def _strip_html(text: str) -> str:
     return re.sub(r'<[^>]+>', '', text)

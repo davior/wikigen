@@ -29,6 +29,7 @@ Operation types you handle:
 - rename_pages: Move pages to correct titles (preserves history)
 - edit_pages: Modify existing page content
 - audit_pages: Read-only analysis, returns a report
+- source_images: Find and embed images from Wikimedia Commons into existing pages
 
 When returning JSON plans, you MUST return ONLY valid JSON with no preamble, markdown fences, or explanation. The JSON must match the exact schema provided.
 """
@@ -73,6 +74,20 @@ FIND_REPLACE_SCHEMA = """Return a JSON object with this exact structure:
   ]
 }"""
 
+SOURCE_IMAGES_SCHEMA = """Return a JSON object with this exact structure:
+{
+  "description": "one-sentence summary of the image sourcing plan",
+  "steps": [
+    {
+      "title": "Page Title",
+      "image_query": "concise search terms to find a relevant image on Wikimedia Commons",
+      "caption": "descriptive caption for the image",
+      "placement": "after_lead"
+    }
+  ]
+}
+Placement options: "after_lead" (after the intro paragraph), "section:SectionName" (after a named section heading), "end" (before categories)."""
+
 DISAMBIG_TEMPLATE = "#REDIRECT [[{target}]]\n\n{{{{Redirect}}}}"
 
 DISAMBIG_LISTING_TEMPLATE = """'''{abbr}''' may refer to:
@@ -97,6 +112,8 @@ class OperationStep:
     error: Optional[str] = None
     links_to: list = field(default_factory=list)
     diff: Optional[str] = None
+    image_file: Optional[str] = None
+    commons_url: Optional[str] = None
 
     def to_dict(self):
         return dataclasses.asdict(self)
@@ -175,6 +192,45 @@ def _make_diff(old: str, new: str) -> str:
     ))
 
 
+def _insert_image(content: str, filename: str, caption: str, placement: str) -> str:
+    """Insert a [[File:...]] tag into wikitext at the specified placement."""
+    markup = f'[[File:{filename}|thumb|right|{caption}]]'
+    lines = content.split('\n')
+
+    if placement.startswith('section:'):
+        section = placement[8:].strip()
+        for i, line in enumerate(lines):
+            if re.match(r'^==+\s*' + re.escape(section) + r'\s*==+\s*$', line):
+                insert_pos = i + 1
+                if insert_pos < len(lines) and not lines[insert_pos].strip():
+                    insert_pos += 1
+                lines.insert(insert_pos, markup)
+                lines.insert(insert_pos, '')
+                return '\n'.join(lines)
+
+    if placement == 'end':
+        cat_idx = next((i for i, l in enumerate(lines) if l.strip().startswith('[[Category:')), len(lines))
+        lines.insert(cat_idx, markup)
+        lines.insert(cat_idx, '')
+        return '\n'.join(lines)
+
+    # Default: after_lead — insert before the first section heading
+    for i, line in enumerate(lines):
+        if i > 0 and re.match(r'^==+', line.strip()):
+            lines.insert(i, '')
+            lines.insert(i, markup)
+            return '\n'.join(lines)
+
+    # No heading found — append after first non-empty paragraph break
+    for i in range(1, len(lines)):
+        if lines[i].strip() == '' and lines[i - 1].strip():
+            lines.insert(i + 1, '')
+            lines.insert(i + 1, markup)
+            return '\n'.join(lines)
+
+    return content + '\n\n' + markup
+
+
 def _detect_operation_type(instruction: str) -> str:
     lower = instruction.lower()
     if any(k in lower for k in ['replace', 'find and replace', 'substitute']):
@@ -189,6 +245,8 @@ def _detect_operation_type(instruction: str) -> str:
         return 'edit_pages'
     if any(k in lower for k in ['audit', 'analyse', 'analyze', 'check all', 'review all', 'list all', 'which pages']):
         return 'audit_pages'
+    if any(k in lower for k in ['source image', 'add image', 'find image', 'illustrate', 'pictures for', 'add pictures']):
+        return 'source_images'
     if any(k in lower for k in ['copy', 'duplicate', 'clone']):
         return 'generate_pages'
     return 'generate_pages'
@@ -276,6 +334,7 @@ class WikiAgent:
             'rename_pages': self._plan_rename_pages,
             'edit_pages': self._plan_edit_pages,
             'audit_pages': self._plan_audit_pages,
+            'source_images': self._plan_source_images,
         }
         planner = planners.get(operation_type, self._plan_generate_pages)
 
@@ -563,12 +622,76 @@ class WikiAgent:
         data = _extract_json(self._call_ai(prompt, max_tokens=4096))
         return [], data.get('description', 'Audit complete.')
 
+    def _plan_source_images(self, instruction: str, context_pages: list[dict]) -> tuple[list, str]:
+        prefix = self._build_context_prefix(context_pages)
+        prompt = (
+            f"{prefix}"
+            f"For each wiki page that needs an image, suggest an image search query and caption.\n"
+            f"INSTRUCTION: {instruction}\n\n"
+            f"{SOURCE_IMAGES_SCHEMA}"
+        )
+        data = _extract_json(self._call_ai(prompt, max_tokens=2048))
+        suggestions = data.get('steps', [])
+        description = data.get('description', f'Source images for: {instruction}')
+
+        steps = []
+        for suggestion in suggestions:
+            title = suggestion.get('title', '')
+            image_query = suggestion.get('image_query', title)
+            caption = suggestion.get('caption', '')
+            placement = suggestion.get('placement', 'after_lead')
+
+            page = self.wiki.get_page(title)
+            if not page.get('exists') or not page.get('content'):
+                continue
+
+            try:
+                results = self.wiki.search_commons_images(image_query, limit=5)
+            except Exception:
+                results = []
+            if not results:
+                continue
+
+            filenames_list = '\n'.join(f'{i + 1}. {r["filename"]}' for i, r in enumerate(results))
+            pick_prompt = (
+                f'For the wiki page "{title}", pick the most relevant image from these Wikimedia Commons results:\n'
+                f'{filenames_list}\n\n'
+                f'Caption context: {caption}\n\n'
+                f'Return JSON: {{"index": 1, "caption": "final caption text"}}'
+            )
+            try:
+                pick_data = _extract_json(self._call_ai(pick_prompt, max_tokens=256))
+                idx = max(0, min(int(pick_data.get('index', 1)) - 1, len(results) - 1))
+                final_caption = pick_data.get('caption', caption) or caption
+            except Exception:
+                idx = 0
+                final_caption = caption
+            chosen = results[idx]
+
+            new_content = _insert_image(page['content'], chosen['filename'], final_caption, placement)
+            diff = _make_diff(page['content'], new_content)
+
+            step = OperationStep(
+                type='add_image',
+                title=title,
+                content=new_content,
+                old_content=page['content'],
+                summary=f'Add image: {chosen["filename"]}',
+                diff=diff,
+                image_file=chosen['filename'],
+                commons_url=chosen['commons_url'],
+            )
+            steps.append(step)
+            self._emit({'type': 'step', 'step': step.to_dict()})
+
+        return steps, description
+
     # ── EXECUTE ───────────────────────────────────────────────────────────────
 
     def execute_step(self, step: OperationStep) -> dict:
         step.status = 'executing'
         try:
-            if step.type in ('write', 'edit', 'replace'):
+            if step.type in ('write', 'edit', 'replace', 'add_image'):
                 result = self.wiki.write_page(step.title, step.content, step.summary)
             elif step.type == 'move':
                 result = self.wiki.move_page(step.from_title, step.title, step.summary)
