@@ -599,7 +599,7 @@ def execute_plan_route():
     exec_q: queue.Queue = queue.Queue()
     _exec_queues[plan_id] = exec_q
 
-    cancel_ev = _cancel_events.get(plan_id, threading.Event())
+    cancel_ev = threading.Event()  # always fresh — clears any prior cancel
     _cancel_events[plan_id] = cancel_ev
 
     def _exec_worker():

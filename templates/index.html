@@ -1006,6 +1006,7 @@ function approveStep(stepId, e) {
   const step = findStep(stepId);
   if (!step) return;
   step.status = 'approved';
+  step.error = null;
   updateStepElement(step);
   if (CONTENT_REQUIRED_TYPES.has(step.type) && !step.content && !_generatingSteps.has(stepId)) {
     generateStepContent(stepId);
@@ -1033,6 +1034,7 @@ function approveAll() {
     if (s.status === 'pending' || s.status === 'rejected') {
       if (_abortControllers[s.id]) _abortControllers[s.id].abort();
       s.status = 'approved';
+      s.error = null;
       updateStepElement(s);
       if (CONTENT_REQUIRED_TYPES.has(s.type) && !s.content && !_generatingSteps.has(s.id)) {
         generateStepContent(s.id);

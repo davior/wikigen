@@ -183,6 +183,34 @@ def _format_site_index(pages_with_cats: dict[str, list[str]]) -> str:
 
 
 _FILE_REF_RE = re.compile(r'\[\[(?:File|Image):([^|\]]+)(\|[^\]]*)?(\]\])', re.IGNORECASE)
+_IMAGE_PLACEHOLDER_RE = re.compile(r'\{\{COMMONS_IMAGE:([^|}]*?)(?:\|([^}]*))?\}\}', re.IGNORECASE)
+
+
+def _resolve_image_placeholders(content: str, wiki) -> str:
+    """Replace {{COMMONS_IMAGE:query|caption}} placeholders with real Commons file refs."""
+    matches = list(_IMAGE_PLACEHOLDER_RE.finditer(content))
+    if not matches:
+        return content
+    seen: dict[str, str | None] = {}
+    for m in matches:
+        query = m.group(1).strip()
+        if query in seen:
+            continue
+        try:
+            results = wiki.search_commons_images(query, limit=3)
+        except Exception:
+            results = []
+        seen[query] = results[0]['filename'] if results else None
+
+    def apply(m):
+        query = m.group(1).strip()
+        caption = (m.group(2) or query).strip()
+        filename = seen.get(query)
+        if not filename:
+            return ''
+        return f'[[File:{filename}|thumb|right|{caption}]]'
+
+    return _IMAGE_PLACEHOLDER_RE.sub(apply, content)
 
 
 def _fix_file_references(content: str, wiki) -> str:
@@ -400,9 +428,15 @@ class WikiAgent:
             '- A lead paragraph\n'
             '- == Section == headings\n'
             '- [[wikilinks]] to related topics\n'
-            '- [[Category:...]] tags at the end'
+            '- [[Category:...]] tags at the end\n\n'
+            'For images: use {{COMMONS_IMAGE:search terms|caption text}} placeholders where '
+            '"search terms" describes what image you want from Wikimedia Commons '
+            '(e.g. {{COMMONS_IMAGE:ancient Roman amphitheater ruins|Roman amphitheater}}). '
+            'The system will search Commons and replace these with real file references. '
+            'Use 0–4 images max. Do NOT use [[File:...]] with invented filenames.'
         )
         content = self._call_ai(prompt)
+        content = _resolve_image_placeholders(content, self.wiki)
         content = _fix_file_references(content, self.wiki)
         return {
             'content': content,
@@ -413,9 +447,14 @@ class WikiAgent:
         prompt = (
             f'Current content of [[{title}]]:\n\n{current_content}\n\n'
             f'Instruction: {instructions}\n\n'
-            'Return the complete revised MediaWiki wikitext only (no JSON, no explanation).'
+            'Return the complete revised MediaWiki wikitext only (no JSON, no explanation).\n\n'
+            'For any new images: use {{COMMONS_IMAGE:search terms|caption text}} placeholders '
+            '(e.g. {{COMMONS_IMAGE:ancient Roman amphitheater ruins|Roman amphitheater}}). '
+            'The system will search Wikimedia Commons and replace these with real file references. '
+            'Do NOT use [[File:...]] with invented filenames.'
         )
         new_content = self._call_ai(prompt)
+        new_content = _resolve_image_placeholders(new_content, self.wiki)
         return _fix_file_references(new_content, self.wiki)
 
     def _execute_find_replace_step(self, step: OperationStep) -> dict:
