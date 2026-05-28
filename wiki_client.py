@@ -241,11 +241,11 @@ class WikiClient:
         return {'success': False, 'error': str(data)}
 
     def get_links_from_page(self, title: str) -> list[str]:
-        """Get [[wikilinks]] from a saved page via the API."""
+        """Get main-namespace [[wikilinks]] from a saved page via the API."""
         links = []
         params = {
             'action': 'query', 'titles': title,
-            'prop': 'links', 'pllimit': 500, 'format': 'json'
+            'prop': 'links', 'pllimit': 500, 'plnamespace': 0, 'format': 'json'
         }
         while True:
             r = self._session.get(self._url, params=params)

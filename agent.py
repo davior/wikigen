@@ -25,8 +25,10 @@ You receive:
 
 Analyse the instruction relative to the existing wiki structure and return a structured plan.
 
+CRITICAL RULE: The SITE INDEX lists EVERY page that currently exists in this wiki. You MUST NOT produce a 'create' step for any title that already appears in the SITE INDEX. When the user asks for "missing pages", only create steps for pages that are explicitly listed as not existing.
+
 Step types you may produce:
-- create: Create a new page from scratch (check the index — do not create pages that already exist)
+- create: Create a new page from scratch (ONLY for titles NOT in the SITE INDEX)
 - edit: Modify an existing page (must exist in the index)
 - delete: Delete a page (must exist in the index)
 - move: Rename a page; title = destination, from_title = source
@@ -72,7 +74,7 @@ Notes:
 - For move: title = destination, from_title = source
 - For find_replace: title = "*", description = the pairs to find and replace
 - For delete: description = reason for deletion
-- Use the site index to avoid creating pages that already exist
+- NEVER produce a create step for a title that appears in the SITE INDEX — it already exists
 - Use depends_on when order matters (e.g. create pages before deleting source)"""
 
 DISAMBIG_TEMPLATE = "#REDIRECT [[{target}]]\n\n{{{{Redirect}}}}"
@@ -258,6 +260,7 @@ class WikiAgent:
         self.connection_id = connection_id
         self.cancel_event = threading.Event()
         self._stream_callback: Optional[Callable] = None
+        self._existing_titles: set[str] = set(site_index.keys()) if site_index else set()
 
         blocks = [{
             'type': 'text',
@@ -310,8 +313,16 @@ class WikiAgent:
             self._stream_callback(event)
 
     def _detect_referenced_pages(self, instruction: str) -> list[str]:
+        # Explicitly quoted titles
         matches = re.findall(r'"([^"]+)"|\'([^\']+)\'', instruction)
-        return [title for pair in matches for title in pair if title]
+        titles = [title for pair in matches for title in pair if title]
+        # Also detect unquoted page titles from the site index that appear in the instruction
+        if self._existing_titles:
+            instr_lower = instruction.lower()
+            for title in self._existing_titles:
+                if title not in titles and title.lower() in instr_lower:
+                    titles.append(title)
+        return titles
 
     # ── PHASE 1: GENERATE PLAN ────────────────────────────────────────────────
 
@@ -327,11 +338,18 @@ class WikiAgent:
                 page = self.wiki.get_page(title)
                 if page.get('exists'):
                     section = f"=== {title} ===\n{page.get('content', '(empty)')}"
-                    # Include outgoing links for "missing links" style queries
+                    # Pre-compute missing vs. existing links so the AI doesn't have to cross-reference
                     try:
                         outgoing = self.wiki.get_links_from_page(title)
                         if outgoing:
-                            section += f"\n\nLinks from this page: {', '.join(outgoing[:100])}"
+                            missing = [l for l in outgoing if l not in self._existing_titles]
+                            already_exist = [l for l in outgoing if l in self._existing_titles]
+                            if missing:
+                                section += '\n\nPages linked from this article that DO NOT EXIST yet (these are candidates to create):\n'
+                                section += '\n'.join(f'  - {l}' for l in missing[:200])
+                            if already_exist:
+                                section += '\n\nPages linked from this article that ALREADY EXIST (do NOT create these):\n'
+                                section += '\n'.join(f'  - {l}' for l in already_exist[:200])
                     except Exception:
                         pass
                     ref_sections.append(section)
