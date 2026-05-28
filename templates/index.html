@@ -127,8 +127,8 @@ textarea#prompt::placeholder { color: var(--text3); }
 .step-item:hover { border-color: var(--border2); }
 .step-item.approved { border-color: var(--accent); }
 .step-item.executing { border-color: var(--warn); }
-.step-item.done { border-color: var(--accent3); }
-.step-item.failed { border-color: var(--danger); }
+.step-item.done { border-color: var(--accent3); background: rgba(46,213,115,0.04); }
+.step-item.failed { border-color: var(--danger); background: rgba(255,34,68,0.04); }
 .step-item.rejected { opacity: 0.45; border-color: rgba(255,34,68,0.4); }
 .step-header { padding: 9px 11px; display: flex; align-items: center; gap: 8px; }
 .step-badge { font-size: 8px; font-family: 'IBM Plex Mono', monospace; padding: 2px 6px; border-radius: 2px; letter-spacing: 1px; flex-shrink: 0; }
@@ -160,6 +160,9 @@ textarea#prompt::placeholder { color: var(--text3); }
 .step-generating-msg { padding: 0 11px 7px; font-size: 9px; color: var(--warn); font-family: 'IBM Plex Mono', monospace; letter-spacing: 0.5px; }
 .step-content-preview { padding: 0 11px 7px; font-size: 9px; color: var(--text3); font-family: 'IBM Plex Mono', monospace; line-height: 1.4; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; }
 .step-content-preview:hover { color: var(--accent3); }
+.step-done-msg { padding: 0 11px 7px; font-size: 9px; font-family: 'IBM Plex Mono', monospace; letter-spacing: 0.5px; }
+.step-done-msg.done { color: var(--accent3); }
+.step-done-msg.failed { color: var(--danger); }
 .step-image-thumb { padding: 5px 11px 7px; }
 .step-image-thumb img { max-width: 100%; max-height: 120px; border-radius: 3px; border: 1px solid var(--border2); display: block; }
 
@@ -979,6 +982,21 @@ function updateStepElement(step) {
     const thumbSrc = `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(step.image_file)}?width=400`;
     const commonsAttr = step.commons_url ? ` data-commons="${escapeHtml(step.commons_url)}"` : '';
     el.insertAdjacentHTML('beforeend', `<div class="step-image-thumb"${commonsAttr}><img src="${thumbSrc}" alt="${escapeHtml(step.image_file)}" onerror="this.parentElement.style.display='none'"></div>`);
+  }
+  // Show completion banner and remove pre-execution UI clutter
+  if (step.status === 'done' || step.status === 'failed') {
+    el.querySelector('.step-generating-msg')?.remove();
+    el.querySelector('.step-content-preview')?.remove();
+    let doneEl = el.querySelector('.step-done-msg');
+    if (!doneEl) {
+      doneEl = document.createElement('div');
+      doneEl.className = `step-done-msg ${step.status}`;
+      el.appendChild(doneEl);
+    }
+    doneEl.className = `step-done-msg ${step.status}`;
+    doneEl.textContent = step.status === 'done' ? '✓ EXECUTED' : '✕ FAILED';
+  } else {
+    el.querySelector('.step-done-msg')?.remove();
   }
   updateExecuteBtn();
 }
