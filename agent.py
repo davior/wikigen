@@ -478,17 +478,27 @@ class WikiAgent:
         page = self.wiki.get_page(step.title)
         if not page.get('exists') or not page.get('content'):
             return {'success': False, 'error': f'Page "{step.title}" not found or empty'}
-        query = step.description or step.title
-        try:
-            results = self.wiki.search_commons_images(query, limit=5)
-        except Exception as e:
-            return {'success': False, 'error': f'Commons search failed: {e}'}
+
+        # Use page title as the primary Commons search term; description guides caption/placement
+        results = []
+        for query in [step.title, step.title.split()[0] if ' ' in step.title else None]:
+            if not query:
+                continue
+            try:
+                results = self.wiki.search_commons_images(query, limit=5)
+            except Exception as e:
+                return {'success': False, 'error': f'Commons search failed: {e}'}
+            if results:
+                break
+
         if not results:
-            return {'success': False, 'error': 'No images found on Commons'}
+            return {'success': False, 'error': f'No images found on Commons for "{step.title}"'}
+
         filenames_list = '\n'.join(f'{i + 1}. {r["filename"]}' for i, r in enumerate(results))
+        context_hint = f'\n\nContext: {step.description[:300]}' if step.description else ''
         pick_prompt = (
             f'For the wiki page "{step.title}", pick the most relevant image:\n'
-            f'{filenames_list}\n\n'
+            f'{filenames_list}{context_hint}\n\n'
             f'Return JSON: {{"index": 1, "caption": "caption text", "placement": "after_lead"}}'
         )
         try:
