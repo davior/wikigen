@@ -132,6 +132,41 @@ class WikiClient:
             params['apcontinue'] = data['continue']['apcontinue']
         return titles
 
+    def get_pages_with_categories(self) -> dict[str, list[str]]:
+        """Return {title: [category_names]} for all main-namespace pages."""
+        self._ensure_connected()
+        result: dict[str, list[str]] = {}
+        params = {
+            'action': 'query',
+            'generator': 'allpages',
+            'gapnamespace': 0,
+            'gaplimit': 50,
+            'prop': 'categories',
+            'cllimit': 50,
+            'clshow': '!hidden',
+            'format': 'json',
+        }
+        while True:
+            r = self._session.get(self._url, params=params)
+            if r.status_code == 403:
+                raise PermissionError(
+                    'Wiki denied access to allpages (HTTP 403). '
+                    'Check bot account read permissions.'
+                )
+            r.raise_for_status()
+            data = r.json()
+            for page in data.get('query', {}).get('pages', {}).values():
+                title = page['title']
+                cats = [c['title'].replace('Category:', '') for c in page.get('categories', [])]
+                if title in result:
+                    result[title].extend(cats)
+                else:
+                    result[title] = cats
+            if 'continue' not in data:
+                break
+            params.update(data['continue'])
+        return result
+
     def search(self, term: str, limit: int = 50) -> list[dict]:
         self._ensure_connected()
         r = self._session.get(self._url, params={
@@ -206,11 +241,11 @@ class WikiClient:
         return {'success': False, 'error': str(data)}
 
     def get_links_from_page(self, title: str) -> list[str]:
-        """Get [[wikilinks]] from a saved page via the API."""
+        """Get main-namespace [[wikilinks]] from a saved page via the API."""
         links = []
         params = {
             'action': 'query', 'titles': title,
-            'prop': 'links', 'pllimit': 500, 'format': 'json'
+            'prop': 'links', 'pllimit': 500, 'plnamespace': 0, 'format': 'json'
         }
         while True:
             r = self._session.get(self._url, params=params)

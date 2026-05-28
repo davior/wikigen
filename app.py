@@ -32,7 +32,9 @@ anthropic_client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY
 
 _plans: dict[str, OperationPlan] = {}
 _wiki_clients: dict[str, WikiClient] = {}
-_job_queues: dict[str, queue.Queue] = {}
+_job_queues: dict[str, queue.Queue] = {}      # plan phase 1 SSE queues
+_exec_queues: dict[str, queue.Queue] = {}     # execute phase 2 SSE queues
+_cancel_events: dict[str, threading.Event] = {}
 
 
 # ─── CONNECTIONS ──────────────────────────────────────────────────────────────
@@ -56,7 +58,6 @@ def _load_connections() -> dict:
             'chips': [],
         })
         default['active_connection_id'] = conn_id
-        # Persist immediately so the UUID stays stable across calls
         _save_connections(default)
     return default
 
@@ -87,7 +88,6 @@ def _get_connection_by_id(connection_id: str) -> dict | None:
 def get_wiki_client(connection_id: str) -> WikiClient | None:
     if connection_id in _wiki_clients:
         client = _wiki_clients[connection_id]
-        # Re-authenticate if session dropped
         if not client._connected:
             client.connect()
         return client
@@ -95,11 +95,7 @@ def get_wiki_client(connection_id: str) -> WikiClient | None:
     if not conn:
         return None
     client = WikiClient(conn['wiki_url'], conn['username'], conn['password'])
-    ok = client.connect()
-    if not ok:
-        # Still cache it so we don't hammer the wiki with retries,
-        # but surface the auth failure clearly to the caller
-        pass
+    client.connect()
     _wiki_clients[connection_id] = client
     return client
 
@@ -148,12 +144,45 @@ def _sse(data: dict) -> str:
     return f'data: {json.dumps(data)}\n\n'
 
 
+def _plan_from_disk(plan_id: str) -> OperationPlan | None:
+    path = PLANS_DIR / f'{plan_id}.json'
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text())
+    plan = OperationPlan(
+        id=data['id'],
+        operation_type=data.get('operation_type', ''),
+        description=data.get('description', ''),
+        connection_id=data.get('connection_id', ''),
+        created_at=data.get('created_at', ''),
+        status=data.get('status', 'pending'),
+    )
+    for s in data.get('steps', []):
+        plan.steps.append(OperationStep(
+            id=s['id'],
+            type=s.get('type', 'write'),
+            title=s.get('title', ''),
+            from_title=s.get('from_title'),
+            content=s.get('content'),
+            old_content=s.get('old_content'),
+            summary=s.get('summary', ''),
+            description=s.get('description', ''),
+            depends_on=s.get('depends_on', []),
+            status=s.get('status', 'pending'),
+            error=s.get('error'),
+            links_to=s.get('links_to', []),
+            diff=s.get('diff'),
+            image_file=s.get('image_file'),
+            commons_url=s.get('commons_url'),
+        ))
+    return plan
+
+
 # ─── CONNECTION MANAGER ROUTES ────────────────────────────────────────────────
 
 @app.route('/api/connections', methods=['GET'])
 def list_connections():
-    data = _load_connections()
-    return jsonify(data)
+    return jsonify(_load_connections())
 
 
 @app.route('/api/connections', methods=['POST'])
@@ -232,38 +261,7 @@ def check_connection():
     return jsonify({'connected': False, 'error': 'Wiki connection failed'})
 
 
-# ─── LEGACY GENERATE / PUBLISH ────────────────────────────────────────────────
-
-@app.route('/api/generate', methods=['POST'])
-def generate():
-    body = request.json or {}
-    prompt = body.get('prompt', '').strip()
-    if not prompt:
-        return jsonify({'error': 'No prompt provided'}), 400
-
-    conn = _resolve_connection(body)
-    if not conn:
-        return jsonify({'error': 'No wiki connection configured'}), 400
-
-    client = get_wiki_client(conn['id'])
-    if not client:
-        return jsonify({'error': 'Wiki connection failed'}), 500
-
-    agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'])
-    plan = agent.plan(prompt, operation_type='generate_pages')
-
-    pages = []
-    for step in plan.steps:
-        page_info = client.get_page(step.title)
-        pages.append({
-            'title': step.title,
-            'content': step.content,
-            'summary': step.summary,
-            'links_to': step.links_to,
-            'exists': page_info.get('exists', False),
-        })
-    return jsonify({'pages': pages})
-
+# ─── LEGACY PUBLISH ───────────────────────────────────────────────────────────
 
 @app.route('/api/publish', methods=['POST'])
 def publish():
@@ -271,31 +269,11 @@ def publish():
     conn = _resolve_connection(body)
     if not conn:
         return jsonify({'error': 'No wiki connection configured'}), 400
-
     client = get_wiki_client(conn['id'])
     if not client:
         return jsonify({'error': 'Wiki connection failed'}), 500
-
     result = client.write_page(body['title'], body['content'], body.get('summary', ''))
     return jsonify(result)
-
-
-@app.route('/api/publish_all', methods=['POST'])
-def publish_all():
-    body = request.json or {}
-    conn = _resolve_connection(body)
-    if not conn:
-        return jsonify({'error': 'No wiki connection configured'}), 400
-
-    client = get_wiki_client(conn['id'])
-    if not client:
-        return jsonify({'error': 'Wiki connection failed'}), 500
-
-    results = []
-    for page in body.get('pages', []):
-        r = client.write_page(page['title'], page['content'], page.get('summary', ''))
-        results.append({'title': page['title'], **r})
-    return jsonify({'results': results})
 
 
 # ─── WIKI READ ROUTES ─────────────────────────────────────────────────────────
@@ -306,15 +284,12 @@ def wiki_page():
     title = request.args.get('title', '').strip()
     if not title:
         return jsonify({'error': 'title required'}), 400
-
     conn = _get_connection_by_id(conn_id) if conn_id else _get_active_connection()
     if not conn:
         return jsonify({'error': 'No connection'}), 400
-
     client = get_wiki_client(conn['id'])
     if not client:
         return jsonify({'error': 'Wiki connection failed'}), 500
-
     return jsonify(client.get_page(title))
 
 
@@ -324,17 +299,13 @@ def wiki_search():
     term = request.args.get('term', '').strip()
     if not term:
         return jsonify({'error': 'term required'}), 400
-
     conn = _get_connection_by_id(conn_id) if conn_id else _get_active_connection()
     if not conn:
         return jsonify({'error': 'No connection'}), 400
-
     client = get_wiki_client(conn['id'])
     if not client:
         return jsonify({'error': 'Wiki connection failed'}), 500
-
-    results = client.search(term)
-    return jsonify({'pages': results})
+    return jsonify({'pages': client.search(term)})
 
 
 @app.route('/api/wiki/all_pages')
@@ -343,11 +314,9 @@ def wiki_all_pages():
     conn = _get_connection_by_id(conn_id) if conn_id else _get_active_connection()
     if not conn:
         return jsonify({'error': 'No connection'}), 400
-
     client = get_wiki_client(conn['id'])
     if not client:
         return jsonify({'error': 'Wiki connection failed'}), 500
-
     return jsonify({'titles': client.get_all_pages()})
 
 
@@ -368,55 +337,47 @@ def agent_plan():
     if not client:
         return jsonify({'error': 'Wiki connection failed'}), 500
 
-    operation_type = body.get('operation_type', 'auto')
     context_pages = body.get('context_pages', [])
 
-    # Streaming operation types: use background thread + SSE
-    if operation_type in ('generate_recursive', 'generate_pages'):
-        plan_id = str(uuid.uuid4())
-        job_q: queue.Queue = queue.Queue()
-        _job_queues[plan_id] = job_q
+    plan_id = str(uuid.uuid4())
+    job_q: queue.Queue = queue.Queue()
+    _job_queues[plan_id] = job_q
 
-        placeholder = OperationPlan(
-            id=plan_id,
-            operation_type=operation_type,
-            description='Planning in progress…',
-            connection_id=conn['id'],
-            status='running',
+    cancel_ev = threading.Event()
+    _cancel_events[plan_id] = cancel_ev
+
+    placeholder = OperationPlan(
+        id=plan_id,
+        operation_type='auto',
+        description='Planning in progress…',
+        connection_id=conn['id'],
+        status='running',
+    )
+    _plans[plan_id] = placeholder
+
+    def _worker():
+        try:
+            site_index = client.get_pages_with_categories()
+        except Exception:
+            site_index = {}
+
+        agent = WikiAgent(
+            client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
+            site_index=site_index, context_pages=context_pages,
         )
-        _plans[plan_id] = placeholder
+        agent._stream_callback = lambda evt: job_q.put(evt)
+        agent.cancel_event = cancel_ev
 
-        def _worker():
-            agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'])
-            agent._stream_callback = lambda evt: job_q.put(evt)
-            try:
-                plan = agent.plan(instruction, operation_type, context_pages)
-                plan.id = plan_id
-                _plans[plan_id] = plan
-                _save_plan_to_disk(plan)
-            except Exception as e:
-                job_q.put({'type': 'error', 'error': str(e)})
+        try:
+            plan = agent.generate_plan(instruction)
+            plan.id = plan_id
+            _plans[plan_id] = plan
+            _save_plan_to_disk(plan)
+        except Exception as e:
+            job_q.put({'type': 'error', 'error': str(e)})
 
-        threading.Thread(target=_worker, daemon=True).start()
-        return jsonify({'plan_id': plan_id, 'status': 'running', 'operation_type': operation_type})
-
-    # All other types: blocking
-    agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'])
-    try:
-        plan = agent.plan(instruction, operation_type, context_pages)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-    _plans[plan.id] = plan
-    _save_plan_to_disk(plan)
-
-    return jsonify({
-        'plan_id': plan.id,
-        'operation_type': plan.operation_type,
-        'description': plan.description,
-        'steps': [s.to_dict() for s in plan.steps],
-        'estimated_count': len(plan.steps),
-    })
+    threading.Thread(target=_worker, daemon=True).start()
+    return jsonify({'plan_id': plan_id, 'status': 'running'})
 
 
 @app.route('/api/agent/plan/stream/<plan_id>')
@@ -438,7 +399,6 @@ def agent_plan_stream(plan_id: str):
 
             if event.get('type') in ('done', 'error'):
                 _job_queues.pop(plan_id, None)
-                # Send final plan state
                 plan = _plans.get(plan_id)
                 if plan and event.get('type') == 'done':
                     yield _sse({
@@ -460,16 +420,27 @@ def agent_plan_stream(plan_id: str):
     )
 
 
+@app.route('/api/agent/plan/<plan_id>/cancel', methods=['POST'])
+def cancel_plan(plan_id: str):
+    if plan_id not in _cancel_events:
+        _cancel_events[plan_id] = threading.Event()
+    _cancel_events[plan_id].set()
+    plan = _plans.get(plan_id)
+    if plan:
+        plan.status = 'failed'
+        _save_plan_to_disk(plan)
+    return jsonify({'success': True})
+
+
 @app.route('/api/agent/plan/<plan_id>', methods=['GET'])
 def get_plan(plan_id: str):
     plan = _plans.get(plan_id)
-    if not plan:
-        # Try loading from disk
-        path = PLANS_DIR / f'{plan_id}.json'
-        if path.exists():
-            return jsonify(json.loads(path.read_text()))
-        return jsonify({'error': 'Plan not found'}), 404
-    return jsonify(plan.to_dict())
+    if plan:
+        return jsonify(plan.to_dict())
+    loaded = _plan_from_disk(plan_id)
+    if loaded:
+        return jsonify(loaded.to_dict())
+    return jsonify({'error': 'Plan not found'}), 404
 
 
 def _load_archived_ids() -> set:
@@ -522,13 +493,55 @@ def archive_plan(plan_id: str):
     return jsonify({'success': True})
 
 
-@app.route('/api/agent/execute_step', methods=['POST'])
-def execute_step():
+# ─── EXECUTE ROUTES ───────────────────────────────────────────────────────────
+
+@app.route('/api/agent/step/preview', methods=['POST'])
+def step_preview_route():
     body = request.json or {}
     plan_id = body.get('plan_id')
     step_id = body.get('step_id')
 
-    plan = _plans.get(plan_id)
+    plan = _plans.get(plan_id) or _plan_from_disk(plan_id)
+    if not plan:
+        return jsonify({'error': 'Plan not found'}), 404
+
+    step = next((s for s in plan.steps if s.id == step_id), None)
+    if not step:
+        return jsonify({'error': 'Step not found'}), 404
+
+    conn = _get_connection_by_id(plan.connection_id)
+    if not conn:
+        return jsonify({'error': 'Connection not found'}), 400
+
+    client = get_wiki_client(conn['id'])
+    if not client:
+        return jsonify({'error': 'Wiki connection failed'}), 500
+
+    try:
+        site_index = client.get_pages_with_categories()
+    except Exception:
+        site_index = {}
+
+    agent = WikiAgent(
+        client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
+        site_index=site_index,
+    )
+    try:
+        agent.generate_step_preview(step)
+        _plans[plan_id] = plan
+        _save_plan_to_disk(plan)
+        return jsonify({'success': True, 'step': step.to_dict()})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e), 'step': step.to_dict()})
+
+
+@app.route('/api/agent/execute_step', methods=['POST'])
+def execute_step_route():
+    body = request.json or {}
+    plan_id = body.get('plan_id')
+    step_id = body.get('step_id')
+
+    plan = _plans.get(plan_id) or _plan_from_disk(plan_id)
     if not plan:
         return jsonify({'error': 'Plan not found'}), 404
 
@@ -547,17 +560,18 @@ def execute_step():
     step.status = 'approved'
     agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'])
     result = agent.execute_step(step)
+    _plans[plan_id] = plan
     _save_plan_to_disk(plan)
     return jsonify({'success': result.get('success', False), 'step': step.to_dict(), **result})
 
 
 @app.route('/api/agent/execute_plan', methods=['POST'])
-def execute_plan():
+def execute_plan_route():
     body = request.json or {}
     plan_id = body.get('plan_id')
     approved_ids = set(body.get('approved_step_ids', []))
 
-    plan = _plans.get(plan_id)
+    plan = _plans.get(plan_id) or _plan_from_disk(plan_id)
     if not plan:
         return jsonify({'error': 'Plan not found'}), 404
 
@@ -574,16 +588,81 @@ def execute_plan():
         if step.id in approved_ids:
             step.status = 'approved'
 
-    agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'])
-    results = agent.execute_plan(plan)
-    _save_plan_to_disk(plan)
-    _append_history(plan, results)
+    # Apply user-edited content overrides (pre-generated or edited in the side editor)
+    step_contents = body.get('step_contents', {})
+    for step in plan.steps:
+        if step.id in step_contents:
+            step.content = step_contents[step.id]
 
-    return jsonify({
-        'results': results,
-        'plan_status': plan.status,
-        'steps': [s.to_dict() for s in plan.steps],
-    })
+    _plans[plan_id] = plan
+
+    exec_q: queue.Queue = queue.Queue()
+    _exec_queues[plan_id] = exec_q
+
+    cancel_ev = _cancel_events.get(plan_id, threading.Event())
+    _cancel_events[plan_id] = cancel_ev
+
+    def _exec_worker():
+        try:
+            site_index = client.get_pages_with_categories()
+        except Exception:
+            site_index = {}
+
+        agent = WikiAgent(
+            client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
+            site_index=site_index,
+        )
+        agent._stream_callback = lambda evt: exec_q.put(evt)
+        agent.cancel_event = cancel_ev
+
+        results = agent.execute_plan(plan)
+        _save_plan_to_disk(plan)
+        _append_history(plan, results)
+
+    threading.Thread(target=_exec_worker, daemon=True).start()
+    return jsonify({'plan_id': plan_id, 'status': 'running'})
+
+
+@app.route('/api/agent/execute/stream/<plan_id>')
+def agent_execute_stream(plan_id: str):
+    def generate():
+        exec_q = _exec_queues.get(plan_id)
+        if not exec_q:
+            yield _sse({'type': 'error', 'error': 'Execution not found'})
+            return
+
+        while True:
+            try:
+                event = exec_q.get(timeout=60)
+            except queue.Empty:
+                yield ': keepalive\n\n'
+                continue
+
+            yield _sse(event)
+
+            if event.get('type') in ('done', 'error'):
+                _exec_queues.pop(plan_id, None)
+                plan = _plans.get(plan_id)
+                if plan and event.get('type') == 'done':
+                    done_count = sum(1 for s in plan.steps if s.status == 'done')
+                    yield _sse({
+                        'type': 'execute_complete',
+                        'plan_id': plan_id,
+                        'plan_status': plan.status,
+                        'steps': [s.to_dict() for s in plan.steps],
+                        'success_count': done_count,
+                    })
+                break
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'X-Accel-Buffering': 'no',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+        },
+    )
 
 
 @app.route('/api/history')
