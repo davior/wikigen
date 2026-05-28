@@ -343,7 +343,7 @@ class WikiAgent:
         user_message = '\n\n'.join(parts)
 
         try:
-            raw = self._call_ai(user_message, max_tokens=4096)
+            raw = self._call_ai(user_message, max_tokens=16000)
             if not raw or not raw.strip():
                 raise ValueError('AI returned an empty response')
             data = _extract_json(raw)
