@@ -495,6 +495,46 @@ def archive_plan(plan_id: str):
 
 # ─── EXECUTE ROUTES ───────────────────────────────────────────────────────────
 
+@app.route('/api/agent/step/preview', methods=['POST'])
+def step_preview_route():
+    body = request.json or {}
+    plan_id = body.get('plan_id')
+    step_id = body.get('step_id')
+
+    plan = _plans.get(plan_id) or _plan_from_disk(plan_id)
+    if not plan:
+        return jsonify({'error': 'Plan not found'}), 404
+
+    step = next((s for s in plan.steps if s.id == step_id), None)
+    if not step:
+        return jsonify({'error': 'Step not found'}), 404
+
+    conn = _get_connection_by_id(plan.connection_id)
+    if not conn:
+        return jsonify({'error': 'Connection not found'}), 400
+
+    client = get_wiki_client(conn['id'])
+    if not client:
+        return jsonify({'error': 'Wiki connection failed'}), 500
+
+    try:
+        site_index = client.get_pages_with_categories()
+    except Exception:
+        site_index = {}
+
+    agent = WikiAgent(
+        client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
+        site_index=site_index,
+    )
+    try:
+        agent.generate_step_preview(step)
+        _plans[plan_id] = plan
+        _save_plan_to_disk(plan)
+        return jsonify({'success': True, 'step': step.to_dict()})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e), 'step': step.to_dict()})
+
+
 @app.route('/api/agent/execute_step', methods=['POST'])
 def execute_step_route():
     body = request.json or {}
@@ -547,6 +587,12 @@ def execute_plan_route():
     for step in plan.steps:
         if step.id in approved_ids:
             step.status = 'approved'
+
+    # Apply user-edited content overrides (pre-generated or edited in the side editor)
+    step_contents = body.get('step_contents', {})
+    for step in plan.steps:
+        if step.id in step_contents:
+            step.content = step_contents[step.id]
 
     _plans[plan_id] = plan
 

@@ -474,10 +474,11 @@ class WikiAgent:
                 written += 1
         return {'success': True, 'pages_written': written}
 
-    def _execute_add_image_step(self, step: OperationStep) -> dict:
+    def _prepare_add_image_content(self, step: OperationStep) -> None:
+        """Populate step.content/diff/image_file/commons_url without writing to wiki. Raises on failure."""
         page = self.wiki.get_page(step.title)
         if not page.get('exists') or not page.get('content'):
-            return {'success': False, 'error': f'Page "{step.title}" not found or empty'}
+            raise ValueError(f'Page "{step.title}" not found or empty')
 
         # Use page title as the primary Commons search term; description guides caption/placement
         results = []
@@ -487,12 +488,12 @@ class WikiAgent:
             try:
                 results = self.wiki.search_commons_images(query, limit=5)
             except Exception as e:
-                return {'success': False, 'error': f'Commons search failed: {e}'}
+                raise ValueError(f'Commons search failed: {e}') from e
             if results:
                 break
 
         if not results:
-            return {'success': False, 'error': f'No images found on Commons for "{step.title}"'}
+            raise ValueError(f'No images found on Commons for "{step.title}"')
 
         filenames_list = '\n'.join(f'{i + 1}. {r["filename"]}' for i, r in enumerate(results))
         context_hint = f'\n\nContext: {step.description[:300]}' if step.description else ''
@@ -515,7 +516,30 @@ class WikiAgent:
         step.diff = _make_diff(page['content'], new_content)
         step.image_file = chosen['filename']
         step.commons_url = chosen['commons_url']
-        return self.wiki.write_page(step.title, new_content, f'Add image: {chosen["filename"]}')
+
+    def _execute_add_image_step(self, step: OperationStep) -> dict:
+        if not step.content:
+            self._prepare_add_image_content(step)
+        return self.wiki.write_page(step.title, step.content, f'Add image: {step.image_file}')
+
+    def generate_step_preview(self, step: OperationStep) -> None:
+        """Populate step.content (and diff/summary) without writing to wiki. Raises on failure."""
+        instruction = step.description or step.summary
+        if step.type in ('create', 'write'):
+            data = self._generate_page_content(step.title, instruction)
+            step.content = data['content']
+            step.summary = data['summary']
+            step.links_to = self.wiki.extract_links_from_content(step.content)
+        elif step.type == 'edit':
+            page = self.wiki.get_page(step.title)
+            if not page.get('exists'):
+                raise ValueError(f'Page "{step.title}" does not exist')
+            step.old_content = page['content']
+            step.content = self._edit_page_content(step.title, step.old_content, instruction)
+            step.diff = _make_diff(step.old_content, step.content)
+            step.summary = step.summary or f'Edit: {step.title}'
+        elif step.type == 'add_image':
+            self._prepare_add_image_content(step)
 
     def _execute_step_with_content(self, step: OperationStep) -> dict:
         """Generate content if needed, then execute the wiki write. Used in Phase 2."""

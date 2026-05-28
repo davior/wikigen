@@ -154,6 +154,12 @@ textarea#prompt::placeholder { color: var(--text3); }
 .step-btn-reject:hover { background: var(--danger); color: white; }
 .step-summary { padding: 0 11px 9px; font-size: 10px; color: var(--text2); font-family: 'IBM Plex Mono', monospace; line-height: 1.4; }
 .step-error { padding: 5px 11px; font-size: 10px; color: var(--danger); font-family: 'IBM Plex Mono', monospace; }
+.step-item.generating { border-color: var(--warn); }
+.step-status-dot.generating { background: var(--warn); box-shadow: 0 0 4px var(--warn); animation: wikigen-pulse 1.2s ease-in-out infinite; }
+@keyframes wikigen-pulse { 0%,100% { opacity:1; } 50% { opacity:0.25; } }
+.step-generating-msg { padding: 0 11px 7px; font-size: 9px; color: var(--warn); font-family: 'IBM Plex Mono', monospace; letter-spacing: 0.5px; }
+.step-content-preview { padding: 0 11px 7px; font-size: 9px; color: var(--text3); font-family: 'IBM Plex Mono', monospace; line-height: 1.4; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; }
+.step-content-preview:hover { color: var(--accent3); }
 .step-image-thumb { padding: 5px 11px 7px; }
 .step-image-thumb img { max-width: 100%; max-height: 120px; border-radius: 3px; border: 1px solid var(--border2); display: block; }
 
@@ -397,7 +403,7 @@ textarea#prompt::placeholder { color: var(--text3); }
         <div class="plan-actions">
           <button class="btn btn-sm btn-ghost" onclick="approveAll()">✓ APPROVE ALL</button>
           <button class="btn btn-sm btn-ghost" onclick="rejectAll()">✕ REJECT ALL</button>
-              <button class="btn btn-success btn-sm" onclick="executeApproved()">▶ EXECUTE APPROVED</button>
+              <button class="btn btn-success btn-sm" id="executeBtn" onclick="executeApproved()" disabled>▶ EXECUTE APPROVED</button>
           <button class="btn btn-danger" id="cancelBtn" style="display:none" onclick="cancelOperation()">■ CANCEL</button>
         </div>
       </div>
@@ -572,6 +578,9 @@ let totalPublished = 0;
 let currentPlan = null;          // {plan_id, operation_type, description, steps}
 let isStreaming = false;
 let contextPages = [];           // [{title, content, url}]
+const CONTENT_REQUIRED_TYPES = new Set(['create', 'write', 'edit', 'add_image']);
+const _generatingSteps = new Set();
+const _abortControllers = {};
 let activeCentreTab = 'plan';
 let activeEditorPage = null;     // the page/step currently open in the editor
 let connections = [];
@@ -869,6 +878,11 @@ async function doPlan() {
 }
 
 function loadPlan(data) {
+  // Abort any in-flight step generation from a previous plan
+  Object.values(_abortControllers).forEach(c => c.abort());
+  Object.keys(_abortControllers).forEach(k => delete _abortControllers[k]);
+  _generatingSteps.clear();
+
   currentPlan = data;
   document.getElementById('totalSteps').textContent = (data.steps || []).length;
   switchCentreTab('plan');
@@ -876,6 +890,7 @@ function loadPlan(data) {
   renderGraph();
   showToast(`Plan ready: ${(data.steps || []).length} steps`, 'success');
   loadPlanHistory();
+  updateExecuteBtn();
 }
 
 function renderPlanView() {
@@ -892,7 +907,12 @@ function renderPlanView() {
   list.innerHTML = '';
   (currentPlan.steps || []).forEach(step => {
     list.appendChild(buildStepElement(step));
+    // Restore content-ready UI for steps that already have content (loaded from history)
+    if (step.content && CONTENT_REQUIRED_TYPES.has(step.type)) {
+      setStepGeneratingUI(step.id, 'ready');
+    }
   });
+  updateExecuteBtn();
 }
 
 function appendStepToView(step) {
@@ -954,6 +974,13 @@ function updateStepElement(step) {
   } else if (errEl) {
     errEl.remove();
   }
+  // Refresh add_image thumbnail if image_file was just populated
+  if (step.type === 'add_image' && step.image_file && !el.querySelector('.step-image-thumb')) {
+    const thumbSrc = `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(step.image_file)}?width=400`;
+    const commonsAttr = step.commons_url ? ` data-commons="${escapeHtml(step.commons_url)}"` : '';
+    el.insertAdjacentHTML('beforeend', `<div class="step-image-thumb"${commonsAttr}><img src="${thumbSrc}" alt="${escapeHtml(step.image_file)}" onerror="this.parentElement.style.display='none'"></div>`);
+  }
+  updateExecuteBtn();
 }
 
 function approveStep(stepId, e) {
@@ -962,32 +989,152 @@ function approveStep(stepId, e) {
   if (!step) return;
   step.status = 'approved';
   updateStepElement(step);
+  if (CONTENT_REQUIRED_TYPES.has(step.type) && !step.content && !_generatingSteps.has(stepId)) {
+    generateStepContent(stepId);
+  } else {
+    updateExecuteBtn();
+  }
 }
 
 function rejectStep(stepId, e) {
   e && e.stopPropagation();
   const step = findStep(stepId);
   if (!step) return;
+  if (_abortControllers[stepId]) {
+    _abortControllers[stepId].abort();
+  }
+  _generatingSteps.delete(stepId);
   step.status = 'rejected';
   updateStepElement(step);
+  updateExecuteBtn();
 }
 
 function approveAll() {
   if (!currentPlan) return;
-  currentPlan.steps.forEach(s => { if (s.status === 'pending' || s.status === 'rejected') { s.status = 'approved'; updateStepElement(s); } });
+  currentPlan.steps.forEach(s => {
+    if (s.status === 'pending' || s.status === 'rejected') {
+      if (_abortControllers[s.id]) _abortControllers[s.id].abort();
+      s.status = 'approved';
+      updateStepElement(s);
+      if (CONTENT_REQUIRED_TYPES.has(s.type) && !s.content && !_generatingSteps.has(s.id)) {
+        generateStepContent(s.id);
+      }
+    }
+  });
+  updateExecuteBtn();
 }
 
 function rejectAll() {
   if (!currentPlan) return;
   let count = 0;
-  currentPlan.steps.forEach(s => { if (s.status !== 'done') { s.status = 'rejected'; updateStepElement(s); count++; } });
+  currentPlan.steps.forEach(s => {
+    if (s.status !== 'done') {
+      if (_abortControllers[s.id]) _abortControllers[s.id].abort();
+      _generatingSteps.delete(s.id);
+      s.status = 'rejected';
+      updateStepElement(s);
+      count++;
+    }
+  });
   if (count) showToast(`${count} step${count !== 1 ? 's' : ''} rejected`, 'info');
+  updateExecuteBtn();
+}
+
+function updateExecuteBtn() {
+  const btn = document.getElementById('executeBtn');
+  if (!btn) return;
+  if (!currentPlan) { btn.disabled = true; return; }
+  const approved = currentPlan.steps.filter(s => s.status === 'approved');
+  if (!approved.length) { btn.disabled = true; return; }
+  if (approved.some(s => _generatingSteps.has(s.id))) { btn.disabled = true; return; }
+  btn.disabled = approved.some(s => CONTENT_REQUIRED_TYPES.has(s.type) && !s.content);
+}
+
+function setStepGeneratingUI(stepId, state) {
+  const el = document.getElementById(`step-${stepId}`);
+  if (!el) return;
+  el.querySelector('.step-generating-msg')?.remove();
+  el.querySelector('.step-content-preview')?.remove();
+  el.classList.remove('generating');
+  const dot = el.querySelector('.step-status-dot');
+  if (state === 'generating') {
+    el.classList.add('generating');
+    if (dot) dot.className = 'step-status-dot generating';
+    const msg = document.createElement('div');
+    msg.className = 'step-generating-msg';
+    msg.textContent = '⟳ GENERATING CONTENT…';
+    el.appendChild(msg);
+  } else if (state === 'ready') {
+    const step = findStep(stepId);
+    if (dot) dot.className = `step-status-dot ${step?.status || 'approved'}`;
+    if (step?.content) {
+      const preview = document.createElement('div');
+      preview.className = 'step-content-preview';
+      preview.title = 'Click to edit in editor';
+      preview.textContent = step.content.slice(0, 200).replace(/\n/g, ' ');
+      preview.onclick = (e) => { e.stopPropagation(); openStepInEditor(findStep(stepId)); };
+      el.appendChild(preview);
+    }
+  }
+  // 'error' state: dot/class handled by updateStepElement via step.error
+}
+
+async function generateStepContent(stepId) {
+  const step = findStep(stepId);
+  if (!step || !CONTENT_REQUIRED_TYPES.has(step.type)) { updateExecuteBtn(); return; }
+  if (step.content) { updateExecuteBtn(); return; }
+
+  const ctrl = new AbortController();
+  _abortControllers[stepId] = ctrl;
+  _generatingSteps.add(stepId);
+  setStepGeneratingUI(stepId, 'generating');
+  updateExecuteBtn();
+
+  try {
+    const resp = await fetch(API_BASE + '/api/agent/step/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan_id: currentPlan.plan_id, step_id: stepId }),
+      signal: ctrl.signal,
+    });
+    const data = await resp.json();
+    const s = findStep(stepId);
+    if (s && data.step) Object.assign(s, data.step);
+    if (data.success) {
+      if (s) updateStepElement(s);
+      setStepGeneratingUI(stepId, 'ready');
+    } else {
+      if (s) { s.error = data.error || 'Preview failed'; updateStepElement(s); }
+      setStepGeneratingUI(stepId, 'error');
+      showToast(`Content generation failed: ${data.error || 'Unknown error'}`, 'error');
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      const s = findStep(stepId);
+      if (s) { s.error = err.message; updateStepElement(s); }
+      setStepGeneratingUI(stepId, 'error');
+      showToast(`Content generation error: ${err.message}`, 'error');
+    } else {
+      setStepGeneratingUI(stepId, 'error');
+    }
+  } finally {
+    _generatingSteps.delete(stepId);
+    delete _abortControllers[stepId];
+    updateExecuteBtn();
+  }
 }
 
 async function executeApproved() {
   if (!currentPlan) return;
+  const btn = document.getElementById('executeBtn');
+  if (btn && btn.disabled) return;
+
   const approvedIds = currentPlan.steps.filter(s => s.status === 'approved').map(s => s.id);
   if (!approvedIds.length) { showToast('No steps approved', 'error'); return; }
+
+  // Collect pre-generated and user-edited content to send to backend
+  const step_contents = {};
+  currentPlan.steps.forEach(s => { if (s.status === 'approved' && s.content) step_contents[s.id] = s.content; });
 
   _executionInProgress = true;
   document.getElementById('planHistoryList').classList.add('locked');
@@ -1001,6 +1148,7 @@ async function executeApproved() {
       body: JSON.stringify({
         plan_id: currentPlan.plan_id,
         approved_step_ids: approvedIds,
+        step_contents,
         connection_id: activeConnectionId,
       }),
     });
@@ -1398,6 +1546,11 @@ function publishAll() {
 function newOperation() {
   document.getElementById('prompt').value = '';
   _activePlanId = null;
+
+  // Abort any in-flight step generation
+  Object.values(_abortControllers).forEach(c => c.abort());
+  Object.keys(_abortControllers).forEach(k => delete _abortControllers[k]);
+  _generatingSteps.clear();
 
   // Clear plan state
   currentPlan = null;
