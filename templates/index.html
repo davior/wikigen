@@ -345,17 +345,6 @@ textarea#prompt::placeholder { color: var(--text3); }
       <button class="icon-btn" onclick="newOperation()" title="New operation" style="font-size:10px;padding:2px 8px;font-family:'IBM Plex Mono',monospace;letter-spacing:1px">+ NEW</button>
     </div>
 
-    <div class="op-type-row" id="opTypeRow">
-      <div class="op-chip active" data-op="auto" onclick="setOpType('auto')">AUTO</div>
-      <div class="op-chip" data-op="generate_pages" onclick="setOpType('generate_pages')">GENERATE</div>
-      <div class="op-chip" data-op="generate_recursive" onclick="setOpType('generate_recursive')">RECURSIVE</div>
-      <div class="op-chip" data-op="edit_pages" onclick="setOpType('edit_pages')">EDIT</div>
-      <div class="op-chip" data-op="find_replace" onclick="setOpType('find_replace')">FIND+REPLACE</div>
-      <div class="op-chip" data-op="ensure_disambig" onclick="setOpType('ensure_disambig')">DISAMBIG</div>
-      <div class="op-chip" data-op="rename_pages" onclick="setOpType('rename_pages')">RENAME</div>
-      <div class="op-chip" data-op="audit_pages" onclick="setOpType('audit_pages')">AUDIT</div>
-      <div class="op-chip" data-op="source_images" onclick="setOpType('source_images')">IMAGES</div>
-    </div>
 
     <div class="prompt-area">
       <div class="prompt-label">// INSTRUCTION</div>
@@ -408,7 +397,8 @@ textarea#prompt::placeholder { color: var(--text3); }
         <div class="plan-actions">
           <button class="btn btn-sm btn-ghost" onclick="approveAll()">✓ APPROVE ALL</button>
           <button class="btn btn-sm btn-ghost" onclick="rejectAll()">✕ REJECT ALL</button>
-          <button class="btn btn-success btn-sm" onclick="executeApproved()">▶ EXECUTE APPROVED</button>
+              <button class="btn btn-success btn-sm" onclick="executeApproved()">▶ EXECUTE APPROVED</button>
+          <button class="btn btn-danger" id="cancelBtn" style="display:none" onclick="cancelOperation()">■ CANCEL</button>
         </div>
       </div>
       <div class="plan-empty" id="planEmpty">
@@ -417,7 +407,7 @@ textarea#prompt::placeholder { color: var(--text3); }
           ─────────────────────<br>
           AWAITING INSTRUCTION
         </div>
-        <div class="plan-empty-hint">Select an operation type → Enter instruction → PLAN</div>
+        <div class="plan-empty-hint">Enter an instruction → PLAN OPERATION → review steps → EXECUTE</div>
       </div>
       <div class="step-list" id="stepList"></div>
     </div>
@@ -581,7 +571,6 @@ let totalPublished = 0;
 
 let currentPlan = null;          // {plan_id, operation_type, description, steps}
 let isStreaming = false;
-let activeOpType = 'auto';
 let contextPages = [];           // [{title, content, url}]
 let activeCentreTab = 'plan';
 let activeEditorPage = null;     // the page/step currently open in the editor
@@ -748,14 +737,6 @@ function saveConnection() {
     });
 }
 
-// ─── OP TYPE ───
-function setOpType(type) {
-  activeOpType = type;
-  document.querySelectorAll('.op-chip').forEach(c => {
-    c.classList.toggle('active', c.dataset.op === type);
-  });
-}
-
 function setPrompt(text) {
   document.getElementById('prompt').value = text;
   document.getElementById('prompt').focus();
@@ -808,6 +789,8 @@ function updateContextUI() {
 }
 
 // ─── PLAN ───
+let _activePlanId = null;
+
 async function doPlan() {
   const instruction = document.getElementById('prompt').value.trim();
   if (!instruction) { showToast('Enter an instruction first', 'error'); return; }
@@ -815,107 +798,47 @@ async function doPlan() {
   const planBtn = document.getElementById('planBtn');
   planBtn.disabled = true;
 
-  if (activeOpType === 'generate_recursive' || activeOpType === 'generate_pages') {
-    await planWithStream(instruction, activeOpType);
-  } else {
-    showLoading('PLANNING OPERATION...', 'Calling Anthropic API');
-    try {
-      const resp = await fetch(API_BASE + '/api/agent/plan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          instruction,
-          operation_type: activeOpType,
-          context_pages: contextPages,
-          connection_id: activeConnectionId,
-        }),
-      });
-      const data = await resp.json();
-      hideLoading();
-      if (data.error) { showToast('Error: ' + data.error, 'error'); planBtn.disabled = false; return; }
-      // Server may have resolved 'auto' to a streaming op type
-      if (data.status === 'running') {
-        await streamExistingPlan(data.plan_id, data.operation_type);
-      } else {
-        loadPlan(data);
-      }
-    } catch (e) {
-      hideLoading();
-      showToast('Request failed: ' + e.message, 'error');
-    }
+  showLoading('FETCHING SITE INDEX...', 'Building full wiki context');
+
+  let resp, data;
+  try {
+    resp = await fetch(API_BASE + '/api/agent/plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        instruction,
+        context_pages: contextPages,
+        connection_id: activeConnectionId,
+      }),
+    });
+    data = await resp.json();
+  } catch (e) {
+    hideLoading();
+    showToast('Request failed: ' + e.message, 'error');
+    planBtn.disabled = false;
+    return;
   }
-  planBtn.disabled = false;
-}
 
-async function streamExistingPlan(planId, operationType) {
-  currentPlan = { plan_id: planId, operation_type: operationType, description: 'Planning in progress...', steps: [] };
-  isStreaming = true;
-  switchCentreTab('plan');
-  renderPlanView();
-  return new Promise((resolve) => {
-    const es = new EventSource(`${API_BASE}/api/agent/plan/stream/${planId}`);
-    es.onmessage = (e) => {
-      const event = JSON.parse(e.data);
-      if (event.type === 'step') {
-        if (!currentPlan.steps) currentPlan.steps = [];
-        currentPlan.steps.push(event.step);
-        document.getElementById('totalSteps').textContent = currentPlan.steps.length;
-        appendStepToView(event.step);
-        renderGraph();
-      } else if (event.type === 'plan_complete') {
-        isStreaming = false;
-        currentPlan.description = event.description;
-        currentPlan.steps = event.steps;
-        renderPlanView();
-        showToast(`Plan complete: ${event.steps.length} pages`, 'success');
-        es.close();
-        resolve();
-      } else if (event.type === 'step_error') {
-        showToast('Page error: ' + event.error, 'error');
-      } else if (event.type === 'error') {
-        isStreaming = false;
-        currentPlan.description = 'Planning failed';
-        renderPlanView();
-        showToast('Streaming error: ' + event.error, 'error');
-        es.close();
-        resolve();
-      }
-    };
-    es.onerror = () => { isStreaming = false; renderPlanView(); es.close(); resolve(); };
-  });
-}
+  if (data.error) {
+    hideLoading();
+    showToast('Error: ' + data.error, 'error');
+    planBtn.disabled = false;
+    return;
+  }
 
-async function planWithStream(instruction, operationType) {
-  const label = operationType === 'generate_recursive' ? 'RECURSIVE PLANNING' : 'GENERATING PAGES';
-  showLoading(`STARTING ${label}...`, 'This may take several minutes');
-
-  const resp = await fetch(API_BASE + '/api/agent/plan', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      instruction,
-      operation_type: operationType,
-      context_pages: contextPages,
-      connection_id: activeConnectionId,
-    }),
-  });
-  const data = await resp.json();
-  if (data.error) { hideLoading(); showToast('Error: ' + data.error, 'error'); return; }
-
-  const planId = data.plan_id;
-  currentPlan = { plan_id: planId, operation_type: operationType, description: 'Planning in progress...', steps: [] };
+  _activePlanId = data.plan_id;
+  currentPlan = { plan_id: data.plan_id, operation_type: 'auto', description: 'Planning…', steps: [] };
   isStreaming = true;
   hideLoading();
   switchCentreTab('plan');
   renderPlanView();
+  setCancelVisible(true);
 
-  // Stream steps via SSE
-  return new Promise((resolve) => {
-    const es = new EventSource(`${API_BASE}/api/agent/plan/stream/${planId}`);
+  await new Promise((resolve) => {
+    const es = new EventSource(`${API_BASE}/api/agent/plan/stream/${data.plan_id}`);
     es.onmessage = (e) => {
       const event = JSON.parse(e.data);
       if (event.type === 'step') {
-        if (!currentPlan.steps) currentPlan.steps = [];
         currentPlan.steps.push(event.step);
         document.getElementById('totalSteps').textContent = currentPlan.steps.length;
         appendStepToView(event.step);
@@ -925,22 +848,24 @@ async function planWithStream(instruction, operationType) {
         currentPlan.description = event.description;
         currentPlan.steps = event.steps;
         renderPlanView();
-        showToast(`Plan complete: ${event.steps.length} pages`, 'success');
+        showToast(`Plan ready: ${event.steps.length} step${event.steps.length !== 1 ? 's' : ''}`, 'success');
+        loadPlanHistory();
         es.close();
         resolve();
-      } else if (event.type === 'step_error') {
-        showToast('Page error: ' + event.error, 'error');
       } else if (event.type === 'error') {
         isStreaming = false;
         currentPlan.description = 'Planning failed';
         renderPlanView();
-        showToast('Streaming error: ' + event.error, 'error');
+        showToast('Planning error: ' + event.error, 'error');
         es.close();
         resolve();
       }
     };
     es.onerror = () => { isStreaming = false; renderPlanView(); es.close(); resolve(); };
   });
+
+  setCancelVisible(false);
+  planBtn.disabled = false;
 }
 
 function loadPlan(data) {
@@ -1004,7 +929,7 @@ function buildStepElement(step) {
         <button class="step-btn step-btn-reject" onclick="rejectStep('${step.id}', event)">✕</button>
       </div>
     </div>
-    <div class="step-summary">${escapeHtml(step.summary || '')}</div>
+    <div class="step-summary">${escapeHtml(step.summary || step.description || '')}</div>
     ${imageThumbHtml}
     ${step.error ? `<div class="step-error">✕ ${escapeHtml(step.error)}</div>` : ''}
   `;
@@ -1066,10 +991,11 @@ async function executeApproved() {
 
   _executionInProgress = true;
   document.getElementById('planHistoryList').classList.add('locked');
-  showLoading('EXECUTING PLAN...', `Writing ${approvedIds.length} pages to wiki`);
+  setCancelVisible(true);
 
+  let resp, data;
   try {
-    const resp = await fetch(API_BASE + '/api/agent/execute_plan', {
+    resp = await fetch(API_BASE + '/api/agent/execute_plan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1078,28 +1004,73 @@ async function executeApproved() {
         connection_id: activeConnectionId,
       }),
     });
-    const data = await resp.json();
-    hideLoading();
-
-    if (data.error) { showToast('Error: ' + data.error, 'error'); return; }
-
-    // Update step statuses from response
-    (data.steps || []).forEach(s => {
-      const local = findStep(s.id);
-      if (local) { Object.assign(local, s); updateStepElement(local); }
-    });
-
-    const ok = (data.results || []).filter(r => r.success).length;
-    const total = (data.results || []).length;
-    showToast(`Executed ${ok}/${total} steps`, ok === total ? 'success' : 'info');
-    renderGraph();
-    loadPlanHistory();
+    data = await resp.json();
   } catch (e) {
-    hideLoading();
     showToast('Execute failed: ' + e.message, 'error');
-  } finally {
     _executionInProgress = false;
+    setCancelVisible(false);
     document.getElementById('planHistoryList').classList.remove('locked');
+    return;
+  }
+
+  if (data.error) {
+    showToast('Error: ' + data.error, 'error');
+    _executionInProgress = false;
+    setCancelVisible(false);
+    document.getElementById('planHistoryList').classList.remove('locked');
+    return;
+  }
+
+  // Stream execution events
+  await new Promise((resolve) => {
+    const es = new EventSource(`${API_BASE}/api/agent/execute/stream/${data.plan_id}`);
+    es.onmessage = (e) => {
+      const event = JSON.parse(e.data);
+      if (event.type === 'step_start') {
+        const step = findStep(event.step_id);
+        if (step) { step.status = 'executing'; updateStepElement(step); }
+      } else if (event.type === 'step_done') {
+        const local = findStep(event.step.id);
+        if (local) { Object.assign(local, event.step); updateStepElement(local); }
+        renderGraph();
+      } else if (event.type === 'execute_complete') {
+        (event.steps || []).forEach(s => {
+          const local = findStep(s.id);
+          if (local) { Object.assign(local, s); updateStepElement(local); }
+        });
+        const ok = event.success_count || 0;
+        const total = approvedIds.length;
+        showToast(`Executed ${ok}/${total} steps`, ok === total ? 'success' : 'info');
+        loadPlanHistory();
+        renderGraph();
+        es.close();
+        resolve();
+      } else if (event.type === 'error') {
+        showToast('Execution error: ' + event.error, 'error');
+        es.close();
+        resolve();
+      }
+    };
+    es.onerror = () => { es.close(); resolve(); };
+  });
+
+  _executionInProgress = false;
+  setCancelVisible(false);
+  document.getElementById('planHistoryList').classList.remove('locked');
+}
+
+function setCancelVisible(visible) {
+  document.getElementById('cancelBtn').style.display = visible ? 'inline-block' : 'none';
+}
+
+async function cancelOperation() {
+  const planId = _activePlanId || (currentPlan && currentPlan.plan_id);
+  if (!planId) return;
+  try {
+    await fetch(`${API_BASE}/api/agent/plan/${planId}/cancel`, { method: 'POST' });
+    showToast('Cancelling…', 'info');
+  } catch (e) {
+    showToast('Cancel failed: ' + e.message, 'error');
   }
 }
 
@@ -1425,9 +1396,8 @@ function publishAll() {
 }
 
 function newOperation() {
-  // Reset instruction
   document.getElementById('prompt').value = '';
-  setOpType('auto');
+  _activePlanId = null;
 
   // Clear plan state
   currentPlan = null;
