@@ -192,6 +192,60 @@ def _make_diff(old: str, new: str) -> str:
     ))
 
 
+_FILE_REF_RE = re.compile(r'\[\[(?:File|Image):([^|\]]+)(\|[^\]]*)?(\]\])', re.IGNORECASE)
+
+
+def _fix_file_references(content: str, wiki) -> str:
+    """Verify [[File:...]] references exist on Commons; replace hallucinated ones with real results."""
+    matches = list(_FILE_REF_RE.finditer(content))
+    if not matches:
+        return content
+
+    filenames = [m.group(1).strip() for m in matches]
+    try:
+        existing = wiki.check_commons_files_exist(filenames)
+    except Exception:
+        return content  # if Commons is unreachable, leave content untouched
+
+    replacements = {}
+    for m in matches:
+        filename = m.group(1).strip()
+        if filename in existing:
+            continue
+        if filename in replacements:
+            continue
+        # Derive a search query from the hallucinated filename
+        query = re.sub(r'\.[^.]+$', '', filename).replace('_', ' ').replace('-', ' ')
+        try:
+            results = wiki.search_commons_images(query, limit=3)
+        except Exception:
+            results = []
+        replacements[filename] = results[0]['filename'] if results else None
+
+    if not any(replacements.values()):
+        # Remove tags for filenames with no substitute found
+        def remove_or_keep(m):
+            filename = m.group(1).strip()
+            sub = replacements.get(filename)
+            if sub is None and filename not in existing:
+                return ''  # no real file found — drop the tag
+            return m.group(0)
+        return _FILE_REF_RE.sub(remove_or_keep, content)
+
+    def apply_replacement(m):
+        filename = m.group(1).strip()
+        options = m.group(2) or ''
+        closing = m.group(3)
+        if filename in existing:
+            return m.group(0)
+        sub = replacements.get(filename)
+        if sub:
+            return f'[[File:{sub}{options}{closing}'
+        return ''  # no substitute — remove the tag
+
+    return _FILE_REF_RE.sub(apply_replacement, content)
+
+
 def _insert_image(content: str, filename: str, caption: str, placement: str) -> str:
     """Insert a [[File:...]] tag into wikitext at the specified placement."""
     markup = f'[[File:{filename}|thumb|right|{caption}]]'
@@ -401,9 +455,13 @@ class WikiAgent:
 
         raw = self._call_ai(prompt, max_tokens=64000)
         try:
-            return _extract_json(raw)
+            page = _extract_json(raw)
         except (json.JSONDecodeError, ValueError):
-            return _recover_page_json(raw, title)
+            page = _recover_page_json(raw, title)
+
+        if page.get('content'):
+            page['content'] = _fix_file_references(page['content'], self.wiki)
+        return page
 
     def _plan_generate_recursive(self, instruction: str, context_pages: list[dict],
                                   max_depth: int = 2, max_pages: int = 20) -> tuple[list, str]:
@@ -592,6 +650,7 @@ class WikiAgent:
             )
             edit_data = _extract_json(self._call_ai(edit_prompt))
             new_content = edit_data.get('content', page['content'])
+            new_content = _fix_file_references(new_content, self.wiki)
             diff = _make_diff(page['content'], new_content)
 
             step = OperationStep(
