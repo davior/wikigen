@@ -315,7 +315,7 @@ class WikiClient:
             'action': 'query',
             'titles': '|'.join(file_titles),
             'prop': 'imageinfo',
-            'iiprop': 'url',
+            'iiprop': 'url|mime',
             'iiurlwidth': 300,
             'format': 'json',
         }, headers=headers, timeout=10)
@@ -326,6 +326,8 @@ class WikiClient:
             if 'imageinfo' not in page:
                 continue
             info = page['imageinfo'][0]
+            if not info.get('mime', '').startswith('image/'):
+                continue
             filename = page['title'][5:]  # strip "File:"
             images.append({
                 'filename': filename,
