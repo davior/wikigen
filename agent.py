@@ -128,9 +128,23 @@ class OperationPlan:
 
 def _extract_json(text: str) -> dict:
     text = text.strip()
+    # Strip markdown fences
     text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\s*```$', '', text, flags=re.MULTILINE)
-    obj, _ = json.JSONDecoder().raw_decode(text.strip())
+    text = re.sub(r'```\s*$', '', text, flags=re.MULTILINE)
+    text = text.strip()
+    # Skip any preamble before the JSON object/array
+    for ch in ('{', '['):
+        pos = text.find(ch)
+        if pos != -1:
+            text = text[pos:]
+            break
+    if not text:
+        raise ValueError('AI returned an empty response — no JSON found')
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(text)
+    except json.JSONDecodeError as e:
+        snippet = text[:120].replace('\n', ' ')
+        raise ValueError(f'JSON parse error: {e}. Response started with: {snippet!r}') from e
     return obj
 
 
@@ -330,6 +344,8 @@ class WikiAgent:
 
         try:
             raw = self._call_ai(user_message, max_tokens=4096)
+            if not raw or not raw.strip():
+                raise ValueError('AI returned an empty response')
             data = _extract_json(raw)
         except Exception as e:
             plan.description = f'Planning failed: {e}'
