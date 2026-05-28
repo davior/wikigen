@@ -1101,7 +1101,7 @@ async function generateStepContent(stepId) {
     const s = findStep(stepId);
     if (s && data.step) Object.assign(s, data.step);
     if (data.success) {
-      if (s) updateStepElement(s);
+      if (s) { s.status = 'approved'; updateStepElement(s); }
       setStepGeneratingUI(stepId, 'ready');
     } else {
       if (s) { s.error = data.error || 'Preview failed'; updateStepElement(s); }
