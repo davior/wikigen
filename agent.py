@@ -280,7 +280,7 @@ class WikiAgent:
                 })
         self._system_blocks = blocks
 
-    def _call_ai(self, user_message: str, max_tokens: int = 8096) -> str:
+    def _call_ai(self, user_message: str, max_tokens: int = 64000) -> str:
         with self.ai.messages.stream(
             model='claude-sonnet-4-6',
             max_tokens=max_tokens,
@@ -343,7 +343,7 @@ class WikiAgent:
         user_message = '\n\n'.join(parts)
 
         try:
-            raw = self._call_ai(user_message, max_tokens=16000)
+            raw = self._call_ai(user_message)
             if not raw or not raw.strip():
                 raise ValueError('AI returned an empty response')
             data = _extract_json(raw)
@@ -384,7 +384,7 @@ class WikiAgent:
             '- [[wikilinks]] to related topics\n'
             '- [[Category:...]] tags at the end'
         )
-        content = self._call_ai(prompt, max_tokens=8096)
+        content = self._call_ai(prompt)
         content = _fix_file_references(content, self.wiki)
         return {
             'content': content,
@@ -397,7 +397,7 @@ class WikiAgent:
             f'Instruction: {instructions}\n\n'
             'Return the complete revised MediaWiki wikitext only (no JSON, no explanation).'
         )
-        new_content = self._call_ai(prompt, max_tokens=8096)
+        new_content = self._call_ai(prompt)
         return _fix_file_references(new_content, self.wiki)
 
     def _execute_find_replace_step(self, step: OperationStep) -> dict:
@@ -407,7 +407,7 @@ class WikiAgent:
             'Return JSON: {"replacements": [{"find": "...", "replace": "..."}]}'
         )
         try:
-            data = _extract_json(self._call_ai(prompt, max_tokens=512))
+            data = _extract_json(self._call_ai(prompt))
         except Exception:
             return {'success': False, 'error': 'Could not parse find/replace pairs'}
         pairs = data.get('replacements', [])
@@ -502,7 +502,7 @@ class WikiAgent:
             f'Return JSON: {{"index": 1, "caption": "caption text", "placement": "after_lead"}}'
         )
         try:
-            pick_data = _extract_json(self._call_ai(pick_prompt, max_tokens=256))
+            pick_data = _extract_json(self._call_ai(pick_prompt))
             idx = max(0, min(int(pick_data.get('index', 1)) - 1, len(results) - 1))
             caption = pick_data.get('caption', step.title)
             placement = pick_data.get('placement', 'after_lead')
