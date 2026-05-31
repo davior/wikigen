@@ -245,6 +245,12 @@ textarea#prompt::placeholder { color: var(--text3); }
 .context-btn.active { border-color: var(--accent3); color: var(--accent3); background: rgba(57,255,20,0.08); }
 .open-wiki-btn { background: none; border: 1px solid var(--border2); border-radius: 3px; color: var(--text3); cursor: pointer; font-family: 'IBM Plex Mono', monospace; font-size: 9px; padding: 4px 9px; letter-spacing: 0.5px; text-decoration: none; display: inline-block; transition: all 0.15s; }
 .open-wiki-btn:hover { border-color: var(--accent); color: var(--accent); }
+.rewrite-panel { padding: 10px 12px 12px; border-top: 1px solid var(--border); background: var(--bg2); flex-shrink: 0; }
+.rewrite-input { width: 100%; box-sizing: border-box; resize: vertical; background: var(--bg3); color: var(--text); border: 1px solid var(--border2); border-radius: 3px; padding: 7px 9px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; margin-bottom: 8px; outline: none; line-height: 1.5; transition: border-color 0.2s; }
+.rewrite-input:focus { border-color: var(--accent); }
+.rewrite-controls { display: flex; align-items: center; gap: 10px; }
+.rewrite-scope-label { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--text2); cursor: pointer; flex: 1; font-family: 'IBM Plex Mono', monospace; letter-spacing: 0.3px; }
+.rewrite-scope-label input { accent-color: var(--accent); cursor: pointer; }
 
 /* ─── LOADING OVERLAY ─── */
 .loading-overlay { position: fixed; inset: 0; background: rgba(10,11,14,0.85); display: none; align-items: center; justify-content: center; z-index: 100; }
@@ -487,9 +493,22 @@ textarea#prompt::placeholder { color: var(--text3); }
         <div id="pageSummary" style="font-size:11px;color:var(--text2);font-family:'IBM Plex Mono',monospace;line-height:1.7"></div>
       </div>
     </div>
+    <div class="rewrite-panel hidden" id="rewritePanel">
+      <textarea id="rewriteInstruction" class="rewrite-input"
+                placeholder="e.g. Rewrite the section on feeding / Add a section on large cats / Rewrite the entire article focusing on conservation"
+                rows="3"></textarea>
+      <div class="rewrite-controls">
+        <label class="rewrite-scope-label" id="rewriteScopeWrap">
+          <input type="checkbox" id="rewriteUsePlanScope">
+          <span>Include plan scope</span>
+        </label>
+        <button class="btn btn-primary btn-sm" onclick="submitRewrite()" id="rewriteSubmitBtn">AI REWRITE</button>
+      </div>
+    </div>
     <div class="editor-footer">
       <button class="btn btn-success btn-sm" id="publishBtn" onclick="publishCurrent()">✓ PUBLISH</button>
       <button class="btn btn-primary btn-sm" onclick="saveEdits()">SAVE</button>
+      <button class="context-btn" id="rewriteToggleBtn" onclick="toggleRewritePanel()">✎ REWRITE</button>
       <button class="context-btn" id="contextBtn" onclick="toggleContext()">+ CONTEXT</button>
       <a class="open-wiki-btn" id="openWikiBtn" href="#" target="_blank">↗ WIKI</a>
       <div style="flex:1"></div>
@@ -1471,6 +1490,58 @@ function saveEdits() {
   }
   renderPreview(activeEditorPage.content);
   showToast('Edits saved locally', 'info');
+}
+
+function toggleRewritePanel() {
+  const panel = document.getElementById('rewritePanel');
+  const btn = document.getElementById('rewriteToggleBtn');
+  const isHidden = panel.classList.toggle('hidden');
+  btn.classList.toggle('active', !isHidden);
+  if (!isHidden) {
+    document.getElementById('rewriteScopeWrap').style.display = currentPlan ? '' : 'none';
+    document.getElementById('rewriteInstruction').focus();
+  }
+}
+
+async function submitRewrite() {
+  if (!activeEditorPage) return;
+  const instruction = document.getElementById('rewriteInstruction').value.trim();
+  if (!instruction) { showToast('Enter a rewrite instruction', 'error'); return; }
+  const btn = document.getElementById('rewriteSubmitBtn');
+  btn.disabled = true;
+  btn.textContent = 'REWRITING…';
+  try {
+    const resp = await fetch(`${API_BASE}/api/wiki/rewrite`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        connection_id: activeConnectionId,
+        title: activeEditorPage.title,
+        content: document.getElementById('content-editor').value || activeEditorPage.content,
+        instruction,
+        use_plan_scope: document.getElementById('rewriteUsePlanScope').checked,
+        plan_id: currentPlan ? currentPlan.id : null,
+      }),
+    });
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    activeEditorPage.content = data.content;
+    document.getElementById('content-editor').value = data.content;
+    if (activeEditorPage.step_id && currentPlan) {
+      const step = findStep(activeEditorPage.step_id);
+      if (step) step.content = data.content;
+    }
+    renderPreview(data.content);
+    switchEditorTab('preview');
+    document.getElementById('rewritePanel').classList.add('hidden');
+    document.getElementById('rewriteToggleBtn').classList.remove('active');
+    showToast('Article rewritten', 'success');
+  } catch (err) {
+    showToast('Rewrite failed: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'AI REWRITE';
+  }
 }
 
 function updateOpenWikiLink(title, directUrl) {

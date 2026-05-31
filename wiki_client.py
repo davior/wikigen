@@ -179,66 +179,89 @@ class WikiClient:
         results = r.json().get('query', {}).get('search', [])
         return [{'title': r['title'], 'snippet': _strip_html(r.get('snippet', ''))} for r in results]
 
+    def _reconnect(self):
+        self._connected = False
+        self._csrf_token = None
+        self.connect()
+
     def write_page(self, title: str, content: str, summary: str = '') -> dict:
-        self._ensure_csrf()
-        self._rate_limit()
-        r = self._session.post(self._url, data={
-            'action': 'edit',
-            'title': title,
-            'text': content,
-            'summary': summary,
-            'bot': '1',
-            'token': self._csrf_token,
-            'format': 'json',
-        })
-        r.raise_for_status()
-        data = r.json()
-        if data.get('edit', {}).get('result') == 'Success':
-            return {'success': True}
-        if 'badtoken' in str(data):
-            self._csrf_token = self._fetch_csrf()
-            return self.write_page(title, content, summary)
-        return {'success': False, 'error': str(data)}
+        for _attempt in range(2):
+            self._ensure_csrf()
+            self._rate_limit()
+            r = self._session.post(self._url, data={
+                'action': 'edit',
+                'title': title,
+                'text': content,
+                'summary': summary,
+                'bot': '1',
+                'token': self._csrf_token,
+                'format': 'json',
+            })
+            r.raise_for_status()
+            data = r.json()
+            if data.get('edit', {}).get('result') == 'Success':
+                return {'success': True}
+            err = str(data)
+            if 'badtoken' in err:
+                self._csrf_token = self._fetch_csrf()
+                continue
+            if 'permissiondenied' in err:
+                self._reconnect()
+                continue
+            return {'success': False, 'error': err}
+        return {'success': False, 'error': 'write_page failed after reconnect'}
 
     def move_page(self, from_title: str, to_title: str, reason: str = '') -> dict:
-        self._ensure_csrf()
-        self._rate_limit()
-        r = self._session.post(self._url, data={
-            'action': 'move',
-            'from': from_title,
-            'to': to_title,
-            'reason': reason,
-            'movetalk': '1',
-            'token': self._csrf_token,
-            'format': 'json',
-        })
-        r.raise_for_status()
-        data = r.json()
-        if 'move' in data:
-            return {'success': True}
-        if 'badtoken' in str(data):
-            self._csrf_token = self._fetch_csrf()
-            return self.move_page(from_title, to_title, reason)
-        return {'success': False, 'error': str(data)}
+        for _attempt in range(2):
+            self._ensure_csrf()
+            self._rate_limit()
+            r = self._session.post(self._url, data={
+                'action': 'move',
+                'from': from_title,
+                'to': to_title,
+                'reason': reason,
+                'movetalk': '1',
+                'token': self._csrf_token,
+                'format': 'json',
+            })
+            r.raise_for_status()
+            data = r.json()
+            if 'move' in data:
+                return {'success': True}
+            err = str(data)
+            if 'badtoken' in err:
+                self._csrf_token = self._fetch_csrf()
+                continue
+            if 'permissiondenied' in err:
+                self._reconnect()
+                continue
+            return {'success': False, 'error': err}
+        return {'success': False, 'error': 'move_page failed after reconnect'}
 
     def delete_page(self, title: str, reason: str = '') -> dict:
-        self._ensure_csrf()
-        self._rate_limit()
-        r = self._session.post(self._url, data={
-            'action': 'delete',
-            'title': title,
-            'reason': reason,
-            'token': self._csrf_token,
-            'format': 'json',
-        })
-        r.raise_for_status()
-        data = r.json()
-        if 'delete' in data:
-            return {'success': True}
-        if 'badtoken' in str(data):
-            self._csrf_token = self._fetch_csrf()
-            return self.delete_page(title, reason)
-        return {'success': False, 'error': str(data)}
+        for _attempt in range(2):
+            self._ensure_csrf()
+            self._rate_limit()
+            r = self._session.post(self._url, data={
+                'action': 'delete',
+                'title': title,
+                'reason': reason,
+                'token': self._csrf_token,
+                'format': 'json',
+            })
+            r.raise_for_status()
+            data = r.json()
+            if 'delete' in data:
+                return {'success': True}
+            err = str(data)
+            if 'badtoken' in err:
+                self._csrf_token = self._fetch_csrf()
+                continue
+            if 'permissiondenied' in err:
+                self._reconnect()
+                continue
+            return {'success': False, 'error': err}
+        return {'success': False, 'error': 'delete_page failed after reconnect'}
 
     def get_links_from_page(self, title: str) -> list[str]:
         """Get main-namespace [[wikilinks]] from a saved page via the API."""
