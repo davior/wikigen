@@ -1526,13 +1526,15 @@ async function submitRewrite() {
     const data = await resp.json();
     if (data.error) throw new Error(data.error);
     activeEditorPage.content = data.content;
+    activeEditorPage.diff = data.diff || '';
     document.getElementById('content-editor').value = data.content;
     if (activeEditorPage.step_id && currentPlan) {
       const step = findStep(activeEditorPage.step_id);
-      if (step) step.content = data.content;
+      if (step) { step.content = data.content; step.diff = data.diff || ''; }
     }
     renderPreview(data.content);
-    switchEditorTab('preview');
+    renderDiff(data.diff || '');
+    switchEditorTab('diff');
     document.getElementById('rewritePanel').classList.add('hidden');
     document.getElementById('rewriteToggleBtn').classList.remove('active');
     showToast('Article rewritten', 'success');

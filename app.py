@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 from flask_cors import CORS
 
-from agent import OperationPlan, OperationStep, WikiAgent
+from agent import OperationPlan, OperationStep, WikiAgent, _make_diff
 from wiki_client import WikiClient
 
 load_dotenv()
@@ -349,7 +349,8 @@ def wiki_rewrite():
 
     agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'], site_index=site_index)
     new_content = agent._edit_page_content(title, content, instruction)
-    return jsonify({'content': new_content})
+    diff = _make_diff(content, new_content)
+    return jsonify({'content': new_content, 'diff': diff})
 
 
 # ─── AGENT PLAN ROUTES ────────────────────────────────────────────────────────
