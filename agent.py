@@ -198,33 +198,7 @@ def _format_site_index(pages_with_cats: dict[str, list[str]]) -> str:
 
 _FILE_REF_RE = re.compile(r'\[\[(?:File|Image):([^|\]]+)(\|[^\]]*)?(\]\])', re.IGNORECASE)
 _IMAGE_PLACEHOLDER_RE = re.compile(r'\{\{COMMONS_IMAGE:([^|}]*?)(?:\|([^}]*))?\}\}', re.IGNORECASE)
-
-
-def _resolve_image_placeholders(content: str, wiki) -> str:
-    """Replace {{COMMONS_IMAGE:query|caption}} placeholders with real Commons file refs."""
-    matches = list(_IMAGE_PLACEHOLDER_RE.finditer(content))
-    if not matches:
-        return content
-    seen: dict[str, str | None] = {}
-    for m in matches:
-        query = m.group(1).strip()
-        if query in seen:
-            continue
-        try:
-            results = wiki.search_commons_images(query, limit=3)
-        except Exception:
-            results = []
-        seen[query] = results[0]['filename'] if results else None
-
-    def apply(m):
-        query = m.group(1).strip()
-        caption = (m.group(2) or query).strip()
-        filename = seen.get(query)
-        if not filename:
-            return ''
-        return f'[[File:{filename}|thumb|right|{caption}]]'
-
-    return _IMAGE_PLACEHOLDER_RE.sub(apply, content)
+MAX_PLACEHOLDER_IMAGES = 3
 
 
 def _fix_file_references(content: str, wiki) -> str:
@@ -534,11 +508,11 @@ class WikiAgent:
             'For images: use {{COMMONS_IMAGE:search terms|caption text}} placeholders where '
             '"search terms" describes what image you want from Wikimedia Commons '
             '(e.g. {{COMMONS_IMAGE:ancient Roman amphitheater ruins|Roman amphitheater}}). '
-            'The system will search Commons and replace these with real file references. '
-            'Use 0–4 images max. Do NOT use [[File:...]] with invented filenames.'
+            'The system will search Commons and pick the best matching file for each. '
+            'Use up to 3 images. Do NOT use [[File:...]] with invented filenames.'
         )
         content = self._call_ai(prompt)
-        content = _resolve_image_placeholders(content, self.wiki)
+        content = self._resolve_image_placeholders(content)
         content = _fix_file_references(content, self.wiki)
         return {
             'content': content,
@@ -552,11 +526,11 @@ class WikiAgent:
             'Return the complete revised MediaWiki wikitext only (no JSON, no explanation).\n\n'
             'For any new images: use {{COMMONS_IMAGE:search terms|caption text}} placeholders '
             '(e.g. {{COMMONS_IMAGE:ancient Roman amphitheater ruins|Roman amphitheater}}). '
-            'The system will search Wikimedia Commons and replace these with real file references. '
-            'Do NOT use [[File:...]] with invented filenames.'
+            'The system will search Wikimedia Commons and pick the best matching file for each. '
+            'Use up to 3 new images. Do NOT use [[File:...]] with invented filenames.'
         )
         new_content = self._call_ai(prompt)
-        new_content = _resolve_image_placeholders(new_content, self.wiki)
+        new_content = self._resolve_image_placeholders(new_content)
         return _fix_file_references(new_content, self.wiki)
 
     def _execute_find_replace_step(self, step: OperationStep) -> dict:
@@ -677,7 +651,7 @@ class WikiAgent:
         if not candidates:
             raise ValueError(f'No images found on Commons for "{step.title}"')
 
-        picks = self._pick_section_images(candidates)
+        picks = self._pick_best_images(candidates)
 
         # Insert sequentially, deduping filenames across sections.
         new_content = content
@@ -739,18 +713,67 @@ class WikiAgent:
             first = sections[0]
             return [{'section': first['name'], 'query': step.title, 'caption': step.title}]
 
-    def _pick_section_images(self, candidates: list[dict]) -> list[int]:
-        """Haiku call: pick the best result index (0-based) per section from filenames."""
+    def _resolve_image_placeholders(self, content: str) -> str:
+        """Replace {{COMMONS_IMAGE:query|caption}} placeholders with real Commons file refs.
+
+        Caps to the first MAX_PLACEHOLDER_IMAGES unique queries and uses the same Haiku
+        best-of-candidates picker as the add_image step (rather than blindly taking the
+        top Commons hit). Placeholders over the cap or with no results are removed.
+        """
+        matches = list(_IMAGE_PLACEHOLDER_RE.finditer(content))
+        if not matches:
+            return content
+
+        # Ordered unique queries, capped.
+        kept_queries: list[str] = []
+        for m in matches:
+            query = m.group(1).strip()
+            if query and query not in kept_queries:
+                kept_queries.append(query)
+        kept_queries = kept_queries[:MAX_PLACEHOLDER_IMAGES]
+
+        # Search Commons per kept query, then pick the best filename per query via Haiku.
+        candidates = []  # [{name: query, results}]
+        for query in kept_queries:
+            try:
+                results = self.wiki.search_commons_images(query, limit=5)
+            except Exception:
+                results = []
+            if results:
+                candidates.append({'name': query, 'results': results})
+
+        picks = self._pick_best_images(candidates)
+        chosen: dict[str, str] = {}
+        for cand, idx in zip(candidates, picks):
+            results = cand['results']
+            idx = max(0, min(idx, len(results) - 1))
+            chosen[cand['name']] = results[idx]['filename']
+
+        def apply(m):
+            query = m.group(1).strip()
+            caption = (m.group(2) or query).strip()
+            filename = chosen.get(query)
+            if not filename:
+                return ''
+            return f'[[File:{filename}|thumb|right|{caption}]]'
+
+        return _IMAGE_PLACEHOLDER_RE.sub(apply, content)
+
+    def _pick_best_images(self, candidates: list[dict]) -> list[int]:
+        """Haiku call: pick the best result index (0-based) per candidate group from filenames.
+
+        Each candidate is {name, results}; returns one chosen index per candidate.
+        """
         if not candidates:
             return []
         blocks = []
         for i, cand in enumerate(candidates):
             files = '\n'.join(f'    {j + 1}. {r["filename"]}' for j, r in enumerate(cand['results']))
-            blocks.append(f'Section {i + 1} ("{cand["name"]}") candidates:\n{files}')
+            blocks.append(f'Option group {i + 1} ("{cand["name"]}") candidates:\n{files}')
         prompt = (
-            'For each section below, pick the most relevant image by its number, based '
-            'on the filenames.\n\n' + '\n\n'.join(blocks) + '\n\n'
-            'Return ONLY JSON mapping section number to chosen image number, e.g. '
+            'For each option group below, pick the most relevant image by its number, '
+            'based on the filenames.\n\n' + '\n\n'.join(blocks) + '\n\n'
+            'Return ONLY JSON mapping group number to chosen image number, e.g. '
             '{"picks": {"1": 2, "2": 1}}'
         )
         try:
