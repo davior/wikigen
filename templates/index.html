@@ -66,6 +66,19 @@ textarea#prompt::placeholder { color: var(--text3); }
 
 .context-indicator { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 10px; font-family: 'IBM Plex Mono', monospace; color: var(--text3); }
 .context-badge { background: var(--accent3); color: var(--bg); padding: 1px 6px; border-radius: 2px; font-size: 9px; display: none; }
+.context-entries { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px; }
+.context-entry { display: inline-flex; align-items: center; gap: 3px; padding: 1px 5px; border-radius: 2px; font-size: 9px; font-family: 'IBM Plex Mono', monospace; color: var(--text2); background: var(--bg4); border: 1px solid var(--border2); max-width: 100%; overflow: hidden; }
+.context-entry .ctx-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
+.context-entry .ctx-remove { cursor: pointer; color: var(--text3); margin-left: 2px; flex-shrink: 0; line-height: 1; }
+.context-entry .ctx-remove:hover { color: var(--danger); }
+.context-url-row { display: flex; gap: 4px; margin-top: 5px; }
+.context-url-input { flex: 1; background: var(--bg3); border: 1px solid var(--border2); border-radius: 3px; color: var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 4px 7px; outline: none; min-width: 0; }
+.context-url-input:focus { border-color: var(--accent); }
+.context-url-input::placeholder { color: var(--text3); }
+.context-doc-btns { display: flex; gap: 4px; margin-top: 5px; }
+.context-doc-btn { background: var(--bg4); border: 1px solid var(--border2); border-radius: 3px; color: var(--text3); cursor: pointer; font-family: 'IBM Plex Mono', monospace; font-size: 9px; padding: 3px 8px; transition: all 0.15s; letter-spacing: 0.5px; }
+.context-doc-btn:hover { border-color: var(--accent3); color: var(--accent3); }
+.ctx-spin { display: inline-block; width: 8px; height: 8px; border: 1px solid var(--text3); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.6s linear infinite; margin-right: 2px; }
 
 .suggestions { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 4px; }
 .suggestion-chip { font-size: 10px; font-family: 'IBM Plex Mono', monospace; padding: 3px 7px; background: var(--bg4); border: 1px solid var(--border2); border-radius: 2px; color: var(--text3); cursor: pointer; transition: all 0.15s; white-space: nowrap; }
@@ -125,9 +138,9 @@ textarea#prompt::placeholder { color: var(--text3); }
 /* Step items */
 .step-item { background: var(--bg2); border: 1px solid var(--border); border-radius: 3px; margin-bottom: 6px; transition: border-color 0.15s; cursor: pointer; }
 .step-item:hover { border-color: var(--border2); }
-.step-item.approved { border-color: var(--accent); }
+.step-item.approved { border-color: var(--accent3); background: rgba(46,213,115,0.04); }
 .step-item.executing { border-color: var(--warn); }
-.step-item.done { border-color: var(--accent3); background: rgba(46,213,115,0.04); }
+.step-item.done { border-color: var(--accent); background: rgba(0,212,255,0.04); }
 .step-item.failed { border-color: var(--danger); background: rgba(255,34,68,0.04); }
 .step-item.rejected { opacity: 0.45; border-color: rgba(255,34,68,0.4); }
 .step-header { padding: 9px 11px; display: flex; align-items: center; gap: 8px; }
@@ -138,12 +151,13 @@ textarea#prompt::placeholder { color: var(--text3); }
 .badge-delete { background: var(--danger); color: white; }
 .badge-replace { background: var(--accent2); color: var(--bg); }
 .badge-image { background: #27ae60; color: white; }
+.badge-upload { background: #8e44ad; color: white; }
 .step-title { flex: 1; font-size: 13px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .step-status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .step-status-dot.pending { background: var(--text3); }
-.step-status-dot.approved { background: var(--accent); box-shadow: 0 0 4px var(--accent); }
+.step-status-dot.approved { background: var(--accent3); box-shadow: 0 0 4px var(--accent3); }
 .step-status-dot.executing { background: var(--warn); box-shadow: 0 0 4px var(--warn); }
-.step-status-dot.done { background: var(--accent3); box-shadow: 0 0 4px var(--accent3); }
+.step-status-dot.done { background: var(--accent); box-shadow: 0 0 4px var(--accent); }
 .step-status-dot.failed { background: var(--danger); box-shadow: 0 0 4px var(--danger); }
 .step-status-dot.rejected { background: var(--danger); opacity: 0.4; }
 .step-controls { display: flex; gap: 5px; flex-shrink: 0; }
@@ -161,7 +175,7 @@ textarea#prompt::placeholder { color: var(--text3); }
 .step-content-preview { padding: 0 11px 7px; font-size: 9px; color: var(--text3); font-family: 'IBM Plex Mono', monospace; line-height: 1.4; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; }
 .step-content-preview:hover { color: var(--accent3); }
 .step-done-msg { padding: 0 11px 7px; font-size: 9px; font-family: 'IBM Plex Mono', monospace; letter-spacing: 0.5px; }
-.step-done-msg.done { color: var(--accent3); }
+.step-done-msg.done { color: var(--accent); }
 .step-done-msg.failed { color: var(--danger); }
 .step-image-thumb { padding: 5px 11px 7px; }
 .step-image-thumb img { max-width: 100%; max-height: 120px; border-radius: 3px; border: 1px solid var(--border2); display: block; }
@@ -371,6 +385,16 @@ textarea#prompt::placeholder { color: var(--text3); }
         <span style="flex:1"></span>
         <button class="step-btn" style="font-size:8px;padding:1px 5px;background:rgba(255,34,68,0.1);color:var(--danger);border:1px solid rgba(255,34,68,0.2);border-radius:2px;cursor:pointer" onclick="clearContext()" title="Clear context">✕ CLEAR</button>
       </div>
+      <div class="context-entries" id="contextEntries"></div>
+      <div class="context-doc-btns">
+        <button class="context-doc-btn" onclick="document.getElementById('contextFileInput').click()" title="Upload a document (PDF, DOCX, TXT, MD, HTML) as context">📎 DOC</button>
+        <button class="context-doc-btn" id="urlToggleBtn" onclick="toggleContextUrlInput()" title="Add a URL as context">🔗 URL</button>
+      </div>
+      <div class="context-url-row" id="contextUrlRow" style="display:none">
+        <input type="text" class="context-url-input" id="contextUrlInput" placeholder="https://..." onkeydown="if(event.key==='Enter')addUrlToContext()">
+        <button class="context-doc-btn" onclick="addUrlToContext()">ADD</button>
+      </div>
+      <input type="file" id="contextFileInput" style="display:none" accept=".txt,.md,.html,.htm,.pdf,.docx" multiple onchange="handleContextFileUpload(event)">
       <div class="suggestions" id="suggestions"></div>
       <button class="btn btn-primary" id="planBtn" onclick="doPlan()">⚡ PLAN OPERATION</button>
     </div>
@@ -802,20 +826,115 @@ function updateContextUI() {
   document.getElementById('contextCount').textContent = count;
   const badge = document.getElementById('contextBadge');
   const hint = document.getElementById('contextHint');
+
+  // Render individual context entries with icons and remove buttons
+  const entriesEl = document.getElementById('contextEntries');
+  entriesEl.innerHTML = '';
+  contextPages.forEach((p, i) => {
+    const icon = p.is_document ? (p.source_url ? '🔗' : '📄') : '📋';
+    const entry = document.createElement('div');
+    entry.className = 'context-entry';
+    entry.title = p.title + (p.source_url ? `\n${p.source_url}` : '');
+    entry.innerHTML = `<span>${icon}</span><span class="ctx-title">${escapeHtml(p.title)}</span><span class="ctx-remove" onclick="removeContextEntry(${i},event)">✕</span>`;
+    entriesEl.appendChild(entry);
+  });
+
   if (count > 0) {
     badge.style.display = 'inline';
-    badge.textContent = `${count} page${count !== 1 ? 's' : ''}`;
-    hint.textContent = contextPages.map(p => p.title).join(', ');
+    badge.textContent = `${count} item${count !== 1 ? 's' : ''}`;
+    hint.textContent = '';
   } else {
     badge.style.display = 'none';
     hint.textContent = 'none loaded';
   }
-  // Update context button state
+  // Update wiki-page context button state (only for wiki pages, not docs/urls)
   const btn = document.getElementById('contextBtn');
   if (activeEditorPage) {
-    const inContext = contextPages.some(p => p.title === activeEditorPage.title);
+    const inContext = contextPages.some(p => p.title === activeEditorPage.title && !p.is_document);
     btn.classList.toggle('active', inContext);
     btn.textContent = inContext ? '✓ CONTEXT' : '+ CONTEXT';
+  }
+}
+
+function removeContextEntry(index, e) {
+  e && e.stopPropagation();
+  contextPages.splice(index, 1);
+  updateContextUI();
+}
+
+// ─── DOCUMENT UPLOAD & URL CONTEXT ───
+
+function toggleContextUrlInput() {
+  const row = document.getElementById('contextUrlRow');
+  const visible = row.style.display !== 'none';
+  row.style.display = visible ? 'none' : 'flex';
+  if (!visible) document.getElementById('contextUrlInput').focus();
+}
+
+async function addUrlToContext() {
+  const input = document.getElementById('contextUrlInput');
+  const url = input.value.trim();
+  if (!url) return;
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    showToast('URL must start with http:// or https://', 'error'); return;
+  }
+  if (contextPages.some(p => p.source_url === url)) {
+    showToast('URL already in context', 'info'); return;
+  }
+  const addBtn = document.querySelector('#contextUrlRow .context-doc-btn');
+  const origText = addBtn.textContent;
+  addBtn.innerHTML = '<span class="ctx-spin"></span>';
+  addBtn.disabled = true;
+  try {
+    const resp = await fetch('/api/fetch_url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    contextPages.push({ title: data.title, content: data.content, source_url: url,
+                        filename: data.filename, upload_id: data.upload_id, is_document: true });
+    input.value = '';
+    document.getElementById('contextUrlRow').style.display = 'none';
+    updateContextUI();
+    showToast(`Added "${data.title}" from URL`, 'success');
+  } catch (e) {
+    showToast('URL fetch failed: ' + e.message, 'error');
+  } finally {
+    addBtn.textContent = origText;
+    addBtn.disabled = false;
+  }
+}
+
+async function handleContextFileUpload(event) {
+  for (const file of event.target.files) {
+    await uploadFileToContext(file);
+  }
+  event.target.value = '';
+}
+
+async function uploadFileToContext(file) {
+  const allowed = ['.txt', '.md', '.html', '.htm', '.pdf', '.docx'];
+  const ext = '.' + file.name.split('.').pop().toLowerCase();
+  if (!allowed.includes(ext)) {
+    showToast(`Unsupported file type: ${ext}`, 'error'); return;
+  }
+  const formData = new FormData();
+  formData.append('file', file);
+  showToast(`Extracting "${file.name}"…`, 'info');
+  try {
+    const resp = await fetch('/api/upload_document', { method: 'POST', body: formData });
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    if (contextPages.some(p => p.title === data.title && p.is_document)) {
+      showToast(`"${data.title}" already in context`, 'info'); return;
+    }
+    contextPages.push({ title: data.title, content: data.content, filename: data.filename, upload_id: data.upload_id, is_document: true });
+    updateContextUI();
+    showToast(`Added "${data.title}" to context`, 'success');
+  } catch (e) {
+    showToast('Upload failed: ' + e.message, 'error');
   }
 }
 
@@ -951,8 +1070,8 @@ function buildStepElement(step) {
   div.className = `step-item ${step.status}`;
   div.id = `step-${step.id}`;
 
-  const badgeClass = { write: 'badge-write', edit: 'badge-edit', move: 'badge-move', delete: 'badge-delete', replace: 'badge-replace', add_image: 'badge-image' }[step.type] || 'badge-write';
-  const badgeLabel = step.type === 'add_image' ? 'IMAGE' : step.type.toUpperCase();
+  const badgeClass = { write: 'badge-write', edit: 'badge-edit', move: 'badge-move', delete: 'badge-delete', replace: 'badge-replace', add_image: 'badge-image', upload_file: 'badge-upload' }[step.type] || 'badge-write';
+  const badgeLabel = step.type === 'add_image' ? 'IMAGE' : step.type === 'upload_file' ? 'UPLOAD' : step.type.toUpperCase();
 
   let imageThumbHtml = '';
   if (step.type === 'add_image' && step.image_file) {

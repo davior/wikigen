@@ -5,6 +5,7 @@ __pycache__/
 connections.json
 history.json
 plans/
+uploads/
 *.egg-info/
 dist/
 build/

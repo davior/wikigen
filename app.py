@@ -1,6 +1,9 @@
+import io
 import json
+import mimetypes
 import os
 import queue
+import re
 import threading
 import uuid
 import dataclasses
@@ -27,6 +30,8 @@ HISTORY_FILE = DATA_DIR / 'history.json'
 PLANS_DIR = DATA_DIR / 'plans'
 PLANS_DIR.mkdir(exist_ok=True)
 ARCHIVED_PLANS_FILE = DATA_DIR / 'archived_plans.json'
+UPLOADS_DIR = DATA_DIR / 'uploads'
+UPLOADS_DIR.mkdir(exist_ok=True)
 
 anthropic_client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY', ''))
 
@@ -174,8 +179,47 @@ def _plan_from_disk(plan_id: str) -> OperationPlan | None:
             diff=s.get('diff'),
             image_file=s.get('image_file'),
             commons_url=s.get('commons_url'),
+            source_url=s.get('source_url'),
+            upload_id=s.get('upload_id'),
         ))
     return plan
+
+
+def _attach_uploads_to_plan(plan: OperationPlan, context_pages: list):
+    """Link upload_file steps to the actual uploaded file bytes.
+
+    Each context document with an upload_id is matched to the corresponding
+    upload_file step. Matching tries exact filename, then stem similarity, then
+    falls back to the sole doc if there's only one unmatched. Any source_url the
+    planner may have grabbed from inside a document's text is cleared — the
+    attached file always takes precedence.
+    """
+    docs = [p for p in (context_pages or []) if p.get('upload_id')]
+    if not docs:
+        return
+    unmatched_docs = list(docs)
+    for step in plan.steps:
+        if step.type != 'upload_file':
+            continue
+        step_fname = step.title.removeprefix('File:').strip()
+        step_stem = Path(step_fname).stem.lower().replace('-', ' ').replace('_', ' ')
+
+        # 1. Exact filename match (case-insensitive)
+        match = next((d for d in unmatched_docs
+                      if d.get('filename', '').lower() == step_fname.lower()), None)
+        # 2. Stem similarity: "report" matches "report.pdf"
+        if not match:
+            match = next((d for d in unmatched_docs
+                          if Path(d.get('filename', '')).stem.lower().replace('-', ' ').replace('_', ' ')
+                          == step_stem), None)
+        # 3. Only one remaining unmatched doc — use it
+        if not match and len(unmatched_docs) == 1:
+            match = unmatched_docs[0]
+
+        if match:
+            step.upload_id = match['upload_id']
+            step.source_url = None
+            unmatched_docs = [d for d in unmatched_docs if d is not match]
 
 
 # ─── CONNECTION MANAGER ROUTES ────────────────────────────────────────────────
@@ -353,6 +397,111 @@ def wiki_rewrite():
     return jsonify({'content': new_content, 'diff': diff})
 
 
+# ─── DOCUMENT UPLOAD & URL FETCH ─────────────────────────────────────────────
+
+def _extract_text_from_file(filename: str, file_bytes: bytes) -> str:
+    ext = Path(filename).suffix.lower()
+    if ext in ('.txt', '.md'):
+        return file_bytes.decode('utf-8', errors='replace')
+    if ext in ('.html', '.htm'):
+        from bs4 import BeautifulSoup
+        return BeautifulSoup(file_bytes, 'lxml').get_text(separator='\n')
+    if ext == '.pdf':
+        import pymupdf
+        doc = pymupdf.open(stream=file_bytes, filetype='pdf')
+        return '\n\n'.join(page.get_text() for page in doc)
+    if ext == '.docx':
+        from docx import Document
+        doc = Document(io.BytesIO(file_bytes))
+        return '\n\n'.join(p.text for p in doc.paragraphs if p.text.strip())
+    raise ValueError(f'Unsupported file type: {ext}')
+
+
+def _fetch_url_text(url: str, timeout: int = 10, max_bytes: int = 1_048_576) -> tuple[str, str, bytes, str]:
+    """Fetch URL and return (title, text, raw_bytes, content_type). Raises on error."""
+    import requests as req_lib
+    resp = req_lib.get(url, timeout=timeout, stream=True,
+                       headers={'User-Agent': 'WikiGen/3.0'})
+    resp.raise_for_status()
+    raw = b''
+    for chunk in resp.iter_content(65536):
+        raw += chunk
+        if len(raw) >= max_bytes:
+            raw = raw[:max_bytes]
+            break
+    content_type = resp.headers.get('Content-Type', '')
+    if 'html' in content_type:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(raw, 'lxml')
+        title_tag = soup.find('title')
+        page_title = title_tag.get_text(strip=True) if title_tag else url
+        for tag in soup(['script', 'style', 'nav', 'footer', 'aside']):
+            tag.decompose()
+        content_el = soup.find('main') or soup.find('article') or soup.find('body') or soup
+        text = content_el.get_text(separator='\n', strip=True)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+    elif 'pdf' in content_type:
+        import pymupdf
+        doc = pymupdf.open(stream=raw, filetype='pdf')
+        text = '\n\n'.join(page.get_text() for page in doc)
+        page_title = url.rsplit('/', 1)[-1] or url
+    else:
+        text = raw.decode('utf-8', errors='replace')
+        page_title = url.rsplit('/', 1)[-1] or url
+    return page_title, text, raw, content_type
+
+
+@app.route('/api/upload_document', methods=['POST'])
+def upload_document():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+    f = request.files['file']
+    filename = f.filename or 'document'
+    allowed_exts = {'.txt', '.md', '.html', '.htm', '.pdf', '.docx'}
+    ext = Path(filename).suffix.lower()
+    if ext not in allowed_exts:
+        return jsonify({'error': f'Unsupported file type: {ext}. Allowed: {", ".join(sorted(allowed_exts))}'}), 400
+    file_bytes = f.read()
+    if len(file_bytes) > 10_485_760:
+        return jsonify({'error': 'File too large (max 10 MB)'}), 400
+    try:
+        text = _extract_text_from_file(filename, file_bytes)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    text = text.strip()[:50000]
+    title = Path(filename).stem.replace('-', ' ').replace('_', ' ')
+    # Persist the original bytes so the file itself (not just its text) can be
+    # uploaded to the wiki later if an upload_file step references it.
+    upload_id = uuid.uuid4().hex
+    (UPLOADS_DIR / upload_id).write_bytes(file_bytes)
+    return jsonify({'title': title, 'content': text, 'filename': filename,
+                    'upload_id': upload_id, 'is_document': True})
+
+
+@app.route('/api/fetch_url', methods=['POST'])
+def fetch_url():
+    body = request.json or {}
+    url = body.get('url', '').strip()
+    if not url:
+        return jsonify({'error': 'url required'}), 400
+    if not url.startswith(('http://', 'https://')):
+        return jsonify({'error': 'URL must start with http:// or https://'}), 400
+    try:
+        title, text, raw_bytes, content_type = _fetch_url_text(url)
+    except Exception as e:
+        return jsonify({'error': f'Failed to fetch URL: {e}'}), 500
+    text = text.strip()[:50000]
+    # Derive a filename from the URL path for wiki upload purposes
+    url_filename = url.rsplit('/', 1)[-1].split('?')[0] or 'document'
+    if not Path(url_filename).suffix:
+        url_filename += '.html'
+    # Save raw bytes so the file can be wiki-uploaded later (e.g. PDF from URL)
+    upload_id = uuid.uuid4().hex
+    (UPLOADS_DIR / upload_id).write_bytes(raw_bytes)
+    return jsonify({'title': title, 'content': text, 'source_url': url,
+                    'filename': url_filename, 'upload_id': upload_id, 'is_document': True})
+
+
 # ─── AGENT PLAN ROUTES ────────────────────────────────────────────────────────
 
 @app.route('/api/agent/plan', methods=['POST'])
@@ -404,6 +553,7 @@ def agent_plan():
         try:
             plan = agent.generate_plan(instruction)
             plan.id = plan_id
+            _attach_uploads_to_plan(plan, context_pages)
             _plans[plan_id] = plan
             _save_plan_to_disk(plan)
         except Exception as e:
@@ -591,7 +741,8 @@ def execute_step_route():
         return jsonify({'error': 'Wiki connection failed'}), 500
 
     step.status = 'approved'
-    agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'])
+    agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
+                      uploads_dir=UPLOADS_DIR)
     result = agent.execute_step(step)
     _plans[plan_id] = plan
     _save_plan_to_disk(plan)
@@ -643,7 +794,7 @@ def execute_plan_route():
 
         agent = WikiAgent(
             client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
-            site_index=site_index,
+            site_index=site_index, uploads_dir=UPLOADS_DIR,
         )
         agent._stream_callback = lambda evt: exec_q.put(evt)
         agent.cancel_event = cancel_ev

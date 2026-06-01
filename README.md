@@ -30,11 +30,25 @@ A Flask web application for managing MediaWiki wikis via AI. Enter a natural lan
 
 ## Installation
 
+Create and activate a virtual environment before installing dependencies:
+
 ```bash
 git clone https://github.com/davior/wikigen.git
 cd wikigen
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
+
+If you come back later and `requirements.txt` has changed, reactivate the virtual environment and reinstall the dependencies:
+
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+If you prefer not to use a virtual environment, you can still install the requirements globally, but a venv is recommended.
 
 ---
 

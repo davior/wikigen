@@ -263,6 +263,63 @@ class WikiClient:
             return {'success': False, 'error': err}
         return {'success': False, 'error': 'delete_page failed after reconnect'}
 
+    def upload_file(self, filename: str, file_data: bytes, mime_type: str = 'application/octet-stream',
+                    description: str = '') -> dict:
+        for _attempt in range(2):
+            self._ensure_csrf()
+            self._rate_limit()
+            r = self._session.post(self._url, data={
+                'action': 'upload',
+                'filename': filename,
+                'comment': description,
+                'text': description,
+                'token': self._csrf_token,
+                'format': 'json',
+                'ignorewarnings': '1',
+            }, files={'file': (filename, file_data, mime_type)})
+            r.raise_for_status()
+            data = r.json()
+            if data.get('upload', {}).get('result') in ('Success', 'Warning'):
+                return {'success': True, 'filename': filename}
+            err = str(data)
+            if 'badtoken' in err:
+                self._csrf_token = self._fetch_csrf()
+                continue
+            if 'permissiondenied' in err:
+                self._reconnect()
+                continue
+            return {'success': False, 'error': err}
+        return {'success': False, 'error': 'upload_file failed after reconnect'}
+
+    def upload_file_from_url(self, filename: str, url: str, description: str = '') -> dict:
+        for _attempt in range(2):
+            self._ensure_csrf()
+            self._rate_limit()
+            r = self._session.post(self._url, data={
+                'action': 'upload',
+                'filename': filename,
+                'url': url,
+                'comment': description,
+                'text': description,
+                'token': self._csrf_token,
+                'format': 'json',
+                'ignorewarnings': '1',
+            })
+            r.raise_for_status()
+            data = r.json()
+            if data.get('upload', {}).get('result') in ('Success', 'Warning'):
+                return {'success': True, 'filename': filename}
+            err = str(data)
+            if 'badtoken' in err:
+                self._csrf_token = self._fetch_csrf()
+                continue
+            if 'permissiondenied' in err:
+                self._reconnect()
+                continue
+            # MediaWiki may disallow remote URL uploads; return clear error
+            return {'success': False, 'error': err}
+        return {'success': False, 'error': 'upload_file_from_url failed after reconnect'}
+
     def get_links_from_page(self, title: str) -> list[str]:
         """Get main-namespace [[wikilinks]] from a saved page via the API."""
         links = []
