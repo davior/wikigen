@@ -929,7 +929,7 @@ async function uploadFileToContext(file) {
     if (contextPages.some(p => p.title === data.title && p.is_document)) {
       showToast(`"${data.title}" already in context`, 'info'); return;
     }
-    contextPages.push({ title: data.title, content: data.content, filename: data.filename, is_document: true });
+    contextPages.push({ title: data.title, content: data.content, filename: data.filename, upload_id: data.upload_id, is_document: true });
     updateContextUI();
     showToast(`Added "${data.title}" to context`, 'success');
   } catch (e) {

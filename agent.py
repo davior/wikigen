@@ -37,7 +37,7 @@ Step types you may produce:
 - find_replace: Bulk text replacement across the wiki; title = "*"; describe find/replace pairs in description
 - ensure_disambig: Create a redirect or disambiguation page for an abbreviation
 - add_image: Source an image from Wikimedia Commons and embed it into an existing page
-- upload_file: Upload a document or file to the wiki file namespace; title = "File:filename.ext"; set source_url for remote files; uploaded files can be referenced as [[File:filename.ext]] in page content
+- upload_file: Upload a document or file to the wiki file namespace; title = "File:filename.ext"; uploaded files can be referenced as [[File:filename.ext]] in page content. If the user attached/uploaded a document (it appears under UPLOADED DOCUMENTS), set title = "File:<that document's filename>" and do NOT set source_url — the attached file itself will be uploaded. Only set source_url when the user explicitly gives a remote file URL to fetch. NEVER use a URL found inside a document's text as source_url; those are just references mentioned in the content, not the file location.
 
 When describing content to create or edit, be specific. The description will be used as the sole instruction for content generation, so include:
 - Topic scope and angle
@@ -111,6 +111,7 @@ class OperationStep:
     image_file: Optional[str] = None
     commons_url: Optional[str] = None
     source_url: Optional[str] = None
+    upload_id: Optional[str] = None
 
     def to_dict(self):
         return dataclasses.asdict(self)
@@ -288,7 +289,7 @@ def _insert_image(content: str, filename: str, caption: str, placement: str) -> 
 class WikiAgent:
     def __init__(self, wiki: WikiClient, anthropic_client, system_prompt: str,
                  connection_id: str, site_index: dict | None = None,
-                 context_pages: list | None = None):
+                 context_pages: list | None = None, uploads_dir=None):
         self.wiki = wiki
         self.ai = anthropic_client
         self.connection_id = connection_id
@@ -296,6 +297,7 @@ class WikiAgent:
         self._stream_callback: Optional[Callable] = None
         self._existing_titles: set[str] = set(site_index.keys()) if site_index else set()
         self._context_docs: list[dict] = context_pages or []
+        self._uploads_dir = uploads_dir
 
         blocks = [{
             'type': 'text',
@@ -630,6 +632,15 @@ class WikiAgent:
     def _execute_upload_file_step(self, step: OperationStep) -> dict:
         filename = step.title.removeprefix('File:')
         description = step.description or step.summary
+        import mimetypes
+
+        # Preferred path: upload the actual attached document bytes.
+        if step.upload_id and self._uploads_dir:
+            path = Path(self._uploads_dir) / step.upload_id
+            if path.exists():
+                mime = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+                return self.wiki.upload_file(filename, path.read_bytes(), mime, description)
+            return {'success': False, 'error': f'Uploaded file for "{filename}" is no longer available'}
 
         if step.source_url:
             # Try wiki-side remote URL upload first (works only if $wgAllowCopyUploads is on)
@@ -647,7 +658,6 @@ class WikiAgent:
                         'Accept-Language': 'en-US,en;q=0.9',
                     })
                     resp.raise_for_status()
-                    import mimetypes
                     mime = (resp.headers.get('Content-Type', '').split(';')[0].strip()
                             or mimetypes.guess_type(filename)[0] or 'application/octet-stream')
                     result = self.wiki.upload_file(filename, resp.content, mime, description)
@@ -655,19 +665,7 @@ class WikiAgent:
                     result = {'success': False, 'error': f'Could not fetch {step.source_url}: {e}'}
             return result
 
-        # Look for a matching document in context by filename or title
-        ctx_doc = next((
-            p for p in self._context_docs
-            if p.get('filename') == filename or p.get('title') == filename
-               or p.get('title') == Path(filename).stem.replace('-', ' ').replace('_', ' ')
-        ), None)
-        if ctx_doc:
-            import mimetypes
-            content_bytes = ctx_doc.get('content', '').encode('utf-8')
-            mime = mimetypes.guess_type(filename)[0] or 'text/plain'
-            return self.wiki.upload_file(filename, content_bytes, mime, description)
-
-        return {'success': False, 'error': 'No source URL or matching context document found for upload_file step'}
+        return {'success': False, 'error': 'No attached file or source URL for this upload — re-attach the document and try again'}
 
     def generate_step_preview(self, step: OperationStep) -> None:
         """Populate step.content (and diff/summary) without writing to wiki. Raises on failure."""

@@ -30,6 +30,8 @@ HISTORY_FILE = DATA_DIR / 'history.json'
 PLANS_DIR = DATA_DIR / 'plans'
 PLANS_DIR.mkdir(exist_ok=True)
 ARCHIVED_PLANS_FILE = DATA_DIR / 'archived_plans.json'
+UPLOADS_DIR = DATA_DIR / 'uploads'
+UPLOADS_DIR.mkdir(exist_ok=True)
 
 anthropic_client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY', ''))
 
@@ -178,8 +180,34 @@ def _plan_from_disk(plan_id: str) -> OperationPlan | None:
             image_file=s.get('image_file'),
             commons_url=s.get('commons_url'),
             source_url=s.get('source_url'),
+            upload_id=s.get('upload_id'),
         ))
     return plan
+
+
+def _attach_uploads_to_plan(plan: OperationPlan, context_pages: list):
+    """Link upload_file steps to the actual uploaded file bytes.
+
+    A document attached as context carries an `upload_id` pointing at its saved
+    bytes. We match each upload_file step to an attached document (by filename,
+    or the sole attachment if there's only one) and pin its upload_id. We also
+    clear any source_url the planner may have lifted from inside the document's
+    text — the attached file itself always takes precedence over a URL mentioned
+    in its content.
+    """
+    docs = [p for p in (context_pages or []) if p.get('upload_id')]
+    if not docs:
+        return
+    for step in plan.steps:
+        if step.type != 'upload_file':
+            continue
+        fname = step.title.removeprefix('File:').strip().lower()
+        match = next((d for d in docs if (d.get('filename', '').lower() == fname)), None)
+        if not match and len(docs) == 1:
+            match = docs[0]
+        if match:
+            step.upload_id = match['upload_id']
+            step.source_url = None
 
 
 # ─── CONNECTION MANAGER ROUTES ────────────────────────────────────────────────
@@ -430,7 +458,12 @@ def upload_document():
         return jsonify({'error': str(e)}), 500
     text = text.strip()[:50000]
     title = Path(filename).stem.replace('-', ' ').replace('_', ' ')
-    return jsonify({'title': title, 'content': text, 'filename': filename, 'is_document': True})
+    # Persist the original bytes so the file itself (not just its text) can be
+    # uploaded to the wiki later if an upload_file step references it.
+    upload_id = uuid.uuid4().hex
+    (UPLOADS_DIR / upload_id).write_bytes(file_bytes)
+    return jsonify({'title': title, 'content': text, 'filename': filename,
+                    'upload_id': upload_id, 'is_document': True})
 
 
 @app.route('/api/fetch_url', methods=['POST'])
@@ -500,6 +533,7 @@ def agent_plan():
         try:
             plan = agent.generate_plan(instruction)
             plan.id = plan_id
+            _attach_uploads_to_plan(plan, context_pages)
             _plans[plan_id] = plan
             _save_plan_to_disk(plan)
         except Exception as e:
@@ -687,7 +721,8 @@ def execute_step_route():
         return jsonify({'error': 'Wiki connection failed'}), 500
 
     step.status = 'approved'
-    agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'])
+    agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
+                      uploads_dir=UPLOADS_DIR)
     result = agent.execute_step(step)
     _plans[plan_id] = plan
     _save_plan_to_disk(plan)
@@ -739,7 +774,7 @@ def execute_plan_route():
 
         agent = WikiAgent(
             client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
-            site_index=site_index,
+            site_index=site_index, uploads_dir=UPLOADS_DIR,
         )
         agent._stream_callback = lambda evt: exec_q.put(evt)
         agent.cancel_event = cancel_ev
