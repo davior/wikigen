@@ -632,20 +632,27 @@ class WikiAgent:
         description = step.description or step.summary
 
         if step.source_url:
-            # Try wiki-side remote URL upload first
+            # Try wiki-side remote URL upload first (works only if $wgAllowCopyUploads is on)
             result = self.wiki.upload_file_from_url(filename, step.source_url, description)
-            if not result.get('success') and ('copyupload' in result.get('error', '') or
-                                               'upload-dialog-disabled' in result.get('error', '')):
-                # Fallback: fetch locally then upload as bytes
+            if not result.get('success'):
+                # Fallback: fetch the file ourselves then upload the bytes.
+                # Use browser-like headers — many CDNs (e.g. Google storage) return
+                # 403 for non-browser User-Agents.
                 try:
-                    resp = requests.get(step.source_url, timeout=15,
-                                        headers={'User-Agent': 'WikiGen/3.0'})
+                    resp = requests.get(step.source_url, timeout=30, headers={
+                        'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                                       'AppleWebKit/537.36 (KHTML, like Gecko) '
+                                       'Chrome/120.0.0.0 Safari/537.36'),
+                        'Accept': '*/*',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                    })
                     resp.raise_for_status()
                     import mimetypes
-                    mime = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+                    mime = (resp.headers.get('Content-Type', '').split(';')[0].strip()
+                            or mimetypes.guess_type(filename)[0] or 'application/octet-stream')
                     result = self.wiki.upload_file(filename, resp.content, mime, description)
                 except Exception as e:
-                    result = {'success': False, 'error': str(e)}
+                    result = {'success': False, 'error': f'Could not fetch {step.source_url}: {e}'}
             return result
 
         # Look for a matching document in context by filename or title
