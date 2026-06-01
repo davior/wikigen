@@ -116,6 +116,7 @@ class OperationStep:
     diff: Optional[str] = None
     image_file: Optional[str] = None
     commons_url: Optional[str] = None
+    images: list = field(default_factory=list)  # [{filename, commons_url, caption, section}]
     source_url: Optional[str] = None
     upload_id: Optional[str] = None
 
@@ -197,33 +198,7 @@ def _format_site_index(pages_with_cats: dict[str, list[str]]) -> str:
 
 _FILE_REF_RE = re.compile(r'\[\[(?:File|Image):([^|\]]+)(\|[^\]]*)?(\]\])', re.IGNORECASE)
 _IMAGE_PLACEHOLDER_RE = re.compile(r'\{\{COMMONS_IMAGE:([^|}]*?)(?:\|([^}]*))?\}\}', re.IGNORECASE)
-
-
-def _resolve_image_placeholders(content: str, wiki) -> str:
-    """Replace {{COMMONS_IMAGE:query|caption}} placeholders with real Commons file refs."""
-    matches = list(_IMAGE_PLACEHOLDER_RE.finditer(content))
-    if not matches:
-        return content
-    seen: dict[str, str | None] = {}
-    for m in matches:
-        query = m.group(1).strip()
-        if query in seen:
-            continue
-        try:
-            results = wiki.search_commons_images(query, limit=3)
-        except Exception:
-            results = []
-        seen[query] = results[0]['filename'] if results else None
-
-    def apply(m):
-        query = m.group(1).strip()
-        caption = (m.group(2) or query).strip()
-        filename = seen.get(query)
-        if not filename:
-            return ''
-        return f'[[File:{filename}|thumb|right|{caption}]]'
-
-    return _IMAGE_PLACEHOLDER_RE.sub(apply, content)
+MAX_PLACEHOLDER_IMAGES = 3
 
 
 def _fix_file_references(content: str, wiki) -> str:
@@ -290,6 +265,42 @@ def _insert_image(content: str, filename: str, caption: str, placement: str) -> 
     return content + '\n\n' + markup
 
 
+def _split_sections(content: str) -> list[dict]:
+    """Split wikitext into the lead + each == Heading == block.
+
+    Returns ordered dicts: {name, placement, text, has_image}. The lead uses
+    name 'Lead' and placement 'after_lead'; headings use placement 'section:<name>'.
+    has_image is True when the section body already contains a File/Image ref.
+    """
+    lines = content.split('\n')
+    sections: list[dict] = []
+    current = {'name': 'Lead', 'placement': 'after_lead', 'lines': []}
+    heading_re = re.compile(r'^(==+)\s*(.*?)\s*==+\s*$')
+    for line in lines:
+        m = heading_re.match(line.strip())
+        if m:
+            sections.append(current)
+            name = m.group(2).strip()
+            current = {'name': name, 'placement': f'section:{name}', 'lines': []}
+        else:
+            current['lines'].append(line)
+    sections.append(current)
+
+    result = []
+    for sec in sections:
+        text = '\n'.join(sec['lines']).strip()
+        # Skip an empty lead (page that opens directly with a heading)
+        if sec['name'] == 'Lead' and not text:
+            continue
+        result.append({
+            'name': sec['name'],
+            'placement': sec['placement'],
+            'text': text,
+            'has_image': bool(_FILE_REF_RE.search(text)),
+        })
+    return result
+
+
 # ─── AGENT ───────────────────────────────────────────────────────────────────
 
 class WikiAgent:
@@ -326,9 +337,10 @@ class WikiAgent:
                 })
         self._system_blocks = blocks
 
-    def _call_ai(self, user_message: str, max_tokens: int = 64000) -> str:
+    def _call_ai(self, user_message: str, max_tokens: int = 64000,
+                 model: str = 'claude-sonnet-4-6') -> str:
         with self.ai.messages.stream(
-            model='claude-sonnet-4-6',
+            model=model,
             max_tokens=max_tokens,
             system=self._system_blocks,
             messages=[{'role': 'user', 'content': user_message}],
@@ -496,11 +508,11 @@ class WikiAgent:
             'For images: use {{COMMONS_IMAGE:search terms|caption text}} placeholders where '
             '"search terms" describes what image you want from Wikimedia Commons '
             '(e.g. {{COMMONS_IMAGE:ancient Roman amphitheater ruins|Roman amphitheater}}). '
-            'The system will search Commons and replace these with real file references. '
-            'Use 0–4 images max. Do NOT use [[File:...]] with invented filenames.'
+            'The system will search Commons and pick the best matching file for each. '
+            'Use up to 3 images. Do NOT use [[File:...]] with invented filenames.'
         )
         content = self._call_ai(prompt)
-        content = _resolve_image_placeholders(content, self.wiki)
+        content = self._resolve_image_placeholders(content)
         content = _fix_file_references(content, self.wiki)
         return {
             'content': content,
@@ -514,11 +526,11 @@ class WikiAgent:
             'Return the complete revised MediaWiki wikitext only (no JSON, no explanation).\n\n'
             'For any new images: use {{COMMONS_IMAGE:search terms|caption text}} placeholders '
             '(e.g. {{COMMONS_IMAGE:ancient Roman amphitheater ruins|Roman amphitheater}}). '
-            'The system will search Wikimedia Commons and replace these with real file references. '
-            'Do NOT use [[File:...]] with invented filenames.'
+            'The system will search Wikimedia Commons and pick the best matching file for each. '
+            'Use up to 3 new images. Do NOT use [[File:...]] with invented filenames.'
         )
         new_content = self._call_ai(prompt)
-        new_content = _resolve_image_placeholders(new_content, self.wiki)
+        new_content = self._resolve_image_placeholders(new_content)
         return _fix_file_references(new_content, self.wiki)
 
     def _execute_find_replace_step(self, step: OperationStep) -> dict:
@@ -596,52 +608,190 @@ class WikiAgent:
         return {'success': True, 'pages_written': written}
 
     def _prepare_add_image_content(self, step: OperationStep) -> None:
-        """Populate step.content/diff/image_file/commons_url without writing to wiki. Raises on failure."""
+        """Populate step.content/diff/images without writing to wiki. Raises on failure.
+
+        Section-aware: analyses the page's sections and adds 1–3 images, one per
+        chosen section, skipping sections that already contain an image. All AI
+        calls use Haiku (filenames/text only — no image pixel analysis) to keep
+        cost down.
+        """
         page = self.wiki.get_page(step.title)
         if not page.get('exists') or not page.get('content'):
             raise ValueError(f'Page "{step.title}" not found or empty')
+        content = page['content']
 
-        # Use page title as the primary Commons search term; description guides caption/placement
-        results = []
-        for query in [step.title, step.title.split()[0] if ' ' in step.title else None]:
-            if not query:
-                continue
+        # Candidate sections = those that don't already have an image.
+        sections = [s for s in _split_sections(content) if not s['has_image']]
+        if not sections:
+            raise ValueError(f'Every section of "{step.title}" already has an image')
+
+        chosen_sections = self._select_image_sections(step, sections)
+        if not chosen_sections:
+            raise ValueError(f'No suitable section found for an image on "{step.title}"')
+
+        # Search Commons per chosen section, then pick the best filename per section.
+        placement_by_name = {s['name']: s['placement'] for s in sections}
+        candidates = []  # [{name, placement, caption, results}]
+        for entry in chosen_sections:
+            name = entry.get('section', '').strip()
+            query = (entry.get('query') or name or step.title).strip()
+            placement = placement_by_name.get(name, 'after_lead')
             try:
                 results = self.wiki.search_commons_images(query, limit=5)
-            except Exception as e:
-                raise ValueError(f'Commons search failed: {e}') from e
+            except Exception:
+                results = []
             if results:
-                break
+                candidates.append({
+                    'name': name,
+                    'placement': placement,
+                    'caption': (entry.get('caption') or name or step.title).strip(),
+                    'results': results,
+                })
 
-        if not results:
+        if not candidates:
             raise ValueError(f'No images found on Commons for "{step.title}"')
 
-        filenames_list = '\n'.join(f'{i + 1}. {r["filename"]}' for i, r in enumerate(results))
-        context_hint = f'\n\nContext: {step.description[:300]}' if step.description else ''
-        pick_prompt = (
-            f'For the wiki page "{step.title}", pick the most relevant image:\n'
-            f'{filenames_list}{context_hint}\n\n'
-            f'Return JSON: {{"index": 1, "caption": "caption text", "placement": "after_lead"}}'
+        picks = self._pick_best_images(candidates)
+
+        # Insert sequentially, deduping filenames across sections.
+        new_content = content
+        used: set[str] = set()
+        images: list[dict] = []
+        for cand, idx in zip(candidates, picks):
+            results = cand['results']
+            idx = max(0, min(idx, len(results) - 1))
+            chosen = results[idx]
+            # Skip a duplicate; fall back to the first unused result in this section.
+            if chosen['filename'] in used:
+                chosen = next((r for r in results if r['filename'] not in used), None)
+                if not chosen:
+                    continue
+            used.add(chosen['filename'])
+            new_content = _insert_image(new_content, chosen['filename'], cand['caption'], cand['placement'])
+            images.append({
+                'filename': chosen['filename'],
+                'commons_url': chosen['commons_url'],
+                'caption': cand['caption'],
+                'section': cand['name'],
+            })
+
+        if not images:
+            raise ValueError(f'No images found on Commons for "{step.title}"')
+
+        step.content = new_content
+        step.old_content = content
+        step.diff = _make_diff(content, new_content)
+        step.images = images
+        step.image_file = images[0]['filename']
+        step.commons_url = images[0]['commons_url']
+
+    def _select_image_sections(self, step: OperationStep, sections: list[dict]) -> list[dict]:
+        """Haiku call: choose 1–3 sections to illustrate, with a query + caption each."""
+        section_blocks = '\n\n'.join(
+            f'- Section: {s["name"]}\n  Content: {s["text"][:400]}' for s in sections
+        )
+        context_hint = f'\n\nUser request context: {step.description[:300]}' if step.description else ''
+        prompt = (
+            f'You are choosing where to add images to the wiki page "{step.title}".\n\n'
+            f'These are the sections that do NOT yet have an image:\n\n{section_blocks}{context_hint}\n\n'
+            'Choose between 1 and 3 of these sections that would most benefit from an '
+            'illustrative image (decide the count based on the content — only pick a '
+            'section if an image genuinely adds value). For each chosen section provide '
+            'a concise Wikimedia Commons search query and a short caption.\n\n'
+            'Return ONLY JSON: '
+            '{"images": [{"section": "<exact section name>", '
+            '"query": "commons search terms", "caption": "caption text"}]}'
         )
         try:
-            pick_data = _extract_json(self._call_ai(pick_prompt))
-            idx = max(0, min(int(pick_data.get('index', 1)) - 1, len(results) - 1))
-            caption = pick_data.get('caption', step.title)
-            placement = pick_data.get('placement', 'after_lead')
+            data = _extract_json(self._call_ai(prompt, model='claude-haiku-4-5-20251001'))
+            picks = data.get('images', []) if isinstance(data, dict) else data
+            valid_names = {s['name'] for s in sections}
+            picks = [p for p in picks if isinstance(p, dict) and p.get('section') in valid_names]
+            return picks[:3]
         except Exception:
-            idx, caption, placement = 0, step.title, 'after_lead'
-        chosen = results[idx]
-        new_content = _insert_image(page['content'], chosen['filename'], caption, placement)
-        step.content = new_content
-        step.old_content = page['content']
-        step.diff = _make_diff(page['content'], new_content)
-        step.image_file = chosen['filename']
-        step.commons_url = chosen['commons_url']
+            # Fall back to illustrating the first candidate section.
+            first = sections[0]
+            return [{'section': first['name'], 'query': step.title, 'caption': step.title}]
+
+    def _resolve_image_placeholders(self, content: str) -> str:
+        """Replace {{COMMONS_IMAGE:query|caption}} placeholders with real Commons file refs.
+
+        Caps to the first MAX_PLACEHOLDER_IMAGES unique queries and uses the same Haiku
+        best-of-candidates picker as the add_image step (rather than blindly taking the
+        top Commons hit). Placeholders over the cap or with no results are removed.
+        """
+        matches = list(_IMAGE_PLACEHOLDER_RE.finditer(content))
+        if not matches:
+            return content
+
+        # Ordered unique queries, capped.
+        kept_queries: list[str] = []
+        for m in matches:
+            query = m.group(1).strip()
+            if query and query not in kept_queries:
+                kept_queries.append(query)
+        kept_queries = kept_queries[:MAX_PLACEHOLDER_IMAGES]
+
+        # Search Commons per kept query, then pick the best filename per query via Haiku.
+        candidates = []  # [{name: query, results}]
+        for query in kept_queries:
+            try:
+                results = self.wiki.search_commons_images(query, limit=5)
+            except Exception:
+                results = []
+            if results:
+                candidates.append({'name': query, 'results': results})
+
+        picks = self._pick_best_images(candidates)
+        chosen: dict[str, str] = {}
+        for cand, idx in zip(candidates, picks):
+            results = cand['results']
+            idx = max(0, min(idx, len(results) - 1))
+            chosen[cand['name']] = results[idx]['filename']
+
+        def apply(m):
+            query = m.group(1).strip()
+            caption = (m.group(2) or query).strip()
+            filename = chosen.get(query)
+            if not filename:
+                return ''
+            return f'[[File:{filename}|thumb|right|{caption}]]'
+
+        return _IMAGE_PLACEHOLDER_RE.sub(apply, content)
+
+    def _pick_best_images(self, candidates: list[dict]) -> list[int]:
+        """Haiku call: pick the best result index (0-based) per candidate group from filenames.
+
+        Each candidate is {name, results}; returns one chosen index per candidate.
+        """
+        if not candidates:
+            return []
+        blocks = []
+        for i, cand in enumerate(candidates):
+            files = '\n'.join(f'    {j + 1}. {r["filename"]}' for j, r in enumerate(cand['results']))
+            blocks.append(f'Option group {i + 1} ("{cand["name"]}") candidates:\n{files}')
+        prompt = (
+            'For each option group below, pick the most relevant image by its number, '
+            'based on the filenames.\n\n' + '\n\n'.join(blocks) + '\n\n'
+            'Return ONLY JSON mapping group number to chosen image number, e.g. '
+            '{"picks": {"1": 2, "2": 1}}'
+        )
+        try:
+            data = _extract_json(self._call_ai(prompt, model='claude-haiku-4-5-20251001'))
+            raw = data.get('picks', {}) if isinstance(data, dict) else {}
+            return [max(0, int(raw.get(str(i + 1), 1)) - 1) for i in range(len(candidates))]
+        except Exception:
+            return [0] * len(candidates)
 
     def _execute_add_image_step(self, step: OperationStep) -> dict:
         if not step.content:
             self._prepare_add_image_content(step)
-        return self.wiki.write_page(step.title, step.content, f'Add image: {step.image_file}')
+        files = [img['filename'] for img in step.images] or ([step.image_file] if step.image_file else [])
+        if len(files) > 1:
+            summary = f'Add {len(files)} images: ' + ', '.join(files)
+        else:
+            summary = f'Add image: {files[0] if files else ""}'
+        return self.wiki.write_page(step.title, step.content, summary)
 
     def _execute_upload_file_step(self, step: OperationStep) -> dict:
         filename = step.title.removeprefix('File:')

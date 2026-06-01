@@ -1066,6 +1066,20 @@ function appendStepToView(step) {
   document.getElementById('stepList').appendChild(buildStepElement(step));
 }
 
+function buildImageThumbs(step) {
+  // Prefer the full images list; fall back to the single image_file (older plans).
+  let imgs = (step.images && step.images.length) ? step.images : [];
+  if (!imgs.length && step.image_file) {
+    imgs = [{ filename: step.image_file, commons_url: step.commons_url }];
+  }
+  return imgs.map(img => {
+    const thumbSrc = `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(img.filename)}?width=400`;
+    const commonsAttr = img.commons_url ? ` data-commons="${escapeHtml(img.commons_url)}"` : '';
+    const title = img.caption ? ` title="${escapeHtml(img.caption)}"` : '';
+    return `<div class="step-image-thumb"${commonsAttr}${title}><img src="${thumbSrc}" alt="${escapeHtml(img.filename)}" onerror="this.parentElement.style.display='none'"></div>`;
+  }).join('');
+}
+
 function buildStepElement(step) {
   const div = document.createElement('div');
   div.className = `step-item ${step.status}`;
@@ -1074,12 +1088,7 @@ function buildStepElement(step) {
   const badgeClass = { write: 'badge-write', edit: 'badge-edit', move: 'badge-move', delete: 'badge-delete', replace: 'badge-replace', add_image: 'badge-image', upload_file: 'badge-upload' }[step.type] || 'badge-write';
   const badgeLabel = step.type === 'add_image' ? 'IMAGE' : step.type === 'upload_file' ? 'UPLOAD' : step.type.toUpperCase();
 
-  let imageThumbHtml = '';
-  if (step.type === 'add_image' && step.image_file) {
-    const thumbSrc = `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(step.image_file)}?width=400`;
-    const commonsLink = step.commons_url ? ` data-commons="${escapeHtml(step.commons_url)}"` : '';
-    imageThumbHtml = `<div class="step-image-thumb"${commonsLink}><img src="${thumbSrc}" alt="${escapeHtml(step.image_file)}" onerror="this.parentElement.style.display='none'"></div>`;
-  }
+  const imageThumbHtml = step.type === 'add_image' ? buildImageThumbs(step) : '';
 
   div.innerHTML = `
     <div class="step-header">
@@ -1116,11 +1125,10 @@ function updateStepElement(step) {
   } else if (errEl) {
     errEl.remove();
   }
-  // Refresh add_image thumbnail if image_file was just populated
-  if (step.type === 'add_image' && step.image_file && !el.querySelector('.step-image-thumb')) {
-    const thumbSrc = `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(step.image_file)}?width=400`;
-    const commonsAttr = step.commons_url ? ` data-commons="${escapeHtml(step.commons_url)}"` : '';
-    el.insertAdjacentHTML('beforeend', `<div class="step-image-thumb"${commonsAttr}><img src="${thumbSrc}" alt="${escapeHtml(step.image_file)}" onerror="this.parentElement.style.display='none'"></div>`);
+  // Refresh add_image thumbnails if images were just populated
+  if (step.type === 'add_image' && !el.querySelector('.step-image-thumb')) {
+    const thumbsHtml = buildImageThumbs(step);
+    if (thumbsHtml) el.insertAdjacentHTML('beforeend', thumbsHtml);
   }
   // Show completion banner and remove pre-execution UI clutter
   if (step.status === 'done' || step.status === 'failed') {
