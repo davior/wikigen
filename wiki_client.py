@@ -79,7 +79,8 @@ class WikiClient:
         })
         r.raise_for_status()
         data = r.json()
-        page = next(iter(data['query']['pages'].values()))
+        pages = data.get('query', {}).get('pages') or {}
+        page = next(iter(pages.values()), {})
         exists = page.get('pageid', -1) != -1 and str(page.get('pageid', -1)) != '-1'
         content = None
         last_modified = None
@@ -105,7 +106,8 @@ class WikiClient:
             'action': 'query', 'titles': title, 'format': 'json'
         })
         r.raise_for_status()
-        page = next(iter(r.json()['query']['pages'].values()))
+        pages = r.json().get('query', {}).get('pages') or {}
+        page = next(iter(pages.values()), {})
         page_id = str(page.get('pageid', -1))
         return page_id != '-1' and int(page_id) > 0
 
@@ -331,7 +333,8 @@ class WikiClient:
             r = self._session.get(self._url, params=params)
             r.raise_for_status()
             data = r.json()
-            page = next(iter(data['query']['pages'].values()))
+            pages = data.get('query', {}).get('pages') or {}
+            page = next(iter(pages.values()), {})
             links.extend(l['title'] for l in page.get('links', []))
             if 'continue' not in data:
                 break
