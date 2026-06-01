@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 from flask_cors import CORS
 
-from agent import OperationPlan, OperationStep, WikiAgent
+from agent import OperationPlan, OperationStep, WikiAgent, _make_diff
 from wiki_client import WikiClient
 
 load_dotenv()
@@ -318,6 +318,39 @@ def wiki_all_pages():
     if not client:
         return jsonify({'error': 'Wiki connection failed'}), 500
     return jsonify({'titles': client.get_all_pages()})
+
+
+@app.route('/api/wiki/rewrite', methods=['POST'])
+def wiki_rewrite():
+    body = request.json or {}
+    title = body.get('title', '')
+    content = body.get('content', '')
+    instruction = body.get('instruction', '').strip()
+    if not instruction:
+        return jsonify({'error': 'instruction required'}), 400
+    use_plan_scope = body.get('use_plan_scope', False)
+    plan_id = body.get('plan_id')
+
+    conn = _resolve_connection(body)
+    if not conn:
+        return jsonify({'error': 'No wiki connection configured'}), 400
+    client = get_wiki_client(conn['id'])
+    if not client:
+        return jsonify({'error': 'Wiki connection failed'}), 500
+
+    if use_plan_scope and plan_id and plan_id in _plans:
+        plan = _plans[plan_id]
+        site_index = {step.title: [] for step in plan.steps}
+    else:
+        try:
+            site_index = client.get_pages_with_categories()
+        except Exception:
+            site_index = {}
+
+    agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'], site_index=site_index)
+    new_content = agent._edit_page_content(title, content, instruction)
+    diff = _make_diff(content, new_content)
+    return jsonify({'content': new_content, 'diff': diff})
 
 
 # ─── AGENT PLAN ROUTES ────────────────────────────────────────────────────────
