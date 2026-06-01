@@ -179,6 +179,7 @@ def _plan_from_disk(plan_id: str) -> OperationPlan | None:
             diff=s.get('diff'),
             image_file=s.get('image_file'),
             commons_url=s.get('commons_url'),
+            images=s.get('images', []),
             source_url=s.get('source_url'),
             upload_id=s.get('upload_id'),
         ))
