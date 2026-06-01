@@ -893,7 +893,8 @@ async function addUrlToContext() {
     });
     const data = await resp.json();
     if (data.error) throw new Error(data.error);
-    contextPages.push({ title: data.title, content: data.content, source_url: url, is_document: true });
+    contextPages.push({ title: data.title, content: data.content, source_url: url,
+                        filename: data.filename, upload_id: data.upload_id, is_document: true });
     input.value = '';
     document.getElementById('contextUrlRow').style.display = 'none';
     updateContextUI();

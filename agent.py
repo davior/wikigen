@@ -37,7 +37,11 @@ Step types you may produce:
 - find_replace: Bulk text replacement across the wiki; title = "*"; describe find/replace pairs in description
 - ensure_disambig: Create a redirect or disambiguation page for an abbreviation
 - add_image: Source an image from Wikimedia Commons and embed it into an existing page
-- upload_file: Upload a document or file to the wiki file namespace; title = "File:filename.ext"; uploaded files can be referenced as [[File:filename.ext]] in page content. If the user attached/uploaded a document (it appears under UPLOADED DOCUMENTS), set title = "File:<that document's filename>" and do NOT set source_url — the attached file itself will be uploaded. Only set source_url when the user explicitly gives a remote file URL to fetch. NEVER use a URL found inside a document's text as source_url; those are just references mentioned in the content, not the file location.
+- upload_file: Upload a document or file to the wiki file namespace; title = "File:<exact filename>" using the filename shown in [wiki filename: File:...] next to the document in the UPLOADED DOCUMENTS section. Do NOT set source_url for attached documents — the bytes are already saved. Only set source_url when the user explicitly provides a remote URL to fetch (not a URL found inside the document's content). After uploading, reference the file in page content as [[File:filename.ext]].
+- When the user has MULTIPLE documents and asks to upload all of them, create one upload_file step per document, each using the exact filename from its [wiki filename: ...] label.
+- When the user wants to find existing pages that should reference an uploaded file, scan the SITE INDEX for topically related pages and create edit steps for them that add [[File:filename.ext]] where appropriate.
+- When the user wants a wiki page CREATED FROM the content of an uploaded document or URL, create a normal create step (not upload_file) and describe the desired page content in the step description; the AI generating that step will have the document text in context to draw from.
+- Use depends_on to ensure upload_file steps complete before any create/edit steps that reference the uploaded file.
 
 When describing content to create or edit, be specific. The description will be used as the sole instruction for content generation, so include:
 - Topic scope and angle
@@ -78,9 +82,11 @@ Notes:
 - For move: title = destination, from_title = source
 - For find_replace: title = "*", description = the pairs to find and replace
 - For delete: description = reason for deletion
-- For upload_file: title = "File:filename.ext", source_url = remote URL to fetch and upload (optional if file is already in context), description = file caption/description; after uploading use [[File:filename.ext]] to reference the file in page content
+- For upload_file: title = "File:<exact filename from context>", description = file caption; do NOT set source_url for attached docs; after uploading use [[File:filename.ext]] to reference it
+- For multiple documents: one upload_file step per document, each with its own exact filename
+- Always use depends_on so create/edit steps that reference [[File:...]] wait for the upload_file step to finish
 - NEVER produce a create step for a title that appears in the SITE INDEX — it already exists
-- Use depends_on when order matters (e.g. create pages before deleting source)"""
+- Use depends_on when order matters (e.g. upload before creating a page that references it)"""
 
 DISAMBIG_TEMPLATE = "#REDIRECT [[{target}]]\n\n{{{{Redirect}}}}"
 
@@ -346,9 +352,11 @@ class WikiAgent:
                 lines.append(f"=== {p['title']} ===\n{p.get('content', '')}")
         if documents:
             lines.append('UPLOADED DOCUMENTS / FETCHED URLS (use as reference material):')
-            for p in documents[:5]:
-                src = f" (source: {p['source_url']})" if p.get('source_url') else ''
-                lines.append(f"=== {p['title']}{src} ===\n{p.get('content', '')}")
+            for p in documents[:10]:
+                fname = p.get('filename', '')
+                fname_note = f' [wiki filename: File:{fname}]' if fname else ''
+                src_note = f' (source: {p["source_url"]})' if p.get('source_url') else ''
+                lines.append(f"=== {p['title']}{fname_note}{src_note} ===\n{p.get('content', '')}")
         return '\n\n'.join(lines) + '\n\n---\n\n'
 
     def _emit(self, event: dict):
@@ -359,10 +367,14 @@ class WikiAgent:
         # Explicitly quoted titles
         matches = re.findall(r'"([^"]+)"|\'([^\']+)\'', instruction)
         titles = [title for pair in matches for title in pair if title]
+        # Uploaded document titles are not wiki pages — exclude them from matching
+        doc_titles = {p.get('title', '').lower() for p in self._context_docs if p.get('is_document')}
         # Also detect unquoted page titles from the site index that appear in the instruction
         if self._existing_titles:
             instr_lower = instruction.lower()
             for title in self._existing_titles:
+                if title.lower() in doc_titles:
+                    continue  # don't confuse document names with wiki page names
                 if title not in titles and title.lower() in instr_lower:
                     titles.append(title)
         return titles
@@ -373,8 +385,10 @@ class WikiAgent:
         plan = OperationPlan(connection_id=self.connection_id, operation_type='auto')
 
         # Auto-fetch URLs found in the instruction and add as context
+        # Skip any URL already supplied as a context document (avoid duplicates)
+        existing_urls = {p.get('source_url') for p in self._context_docs if p.get('source_url')}
         url_pattern = re.compile(r'https?://[^\s,>"\]]+')
-        instruction_urls = url_pattern.findall(instruction)
+        instruction_urls = [u for u in url_pattern.findall(instruction) if u not in existing_urls]
         if instruction_urls:
             fetched_docs = []
             for url in instruction_urls[:3]:

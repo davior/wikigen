@@ -188,26 +188,38 @@ def _plan_from_disk(plan_id: str) -> OperationPlan | None:
 def _attach_uploads_to_plan(plan: OperationPlan, context_pages: list):
     """Link upload_file steps to the actual uploaded file bytes.
 
-    A document attached as context carries an `upload_id` pointing at its saved
-    bytes. We match each upload_file step to an attached document (by filename,
-    or the sole attachment if there's only one) and pin its upload_id. We also
-    clear any source_url the planner may have lifted from inside the document's
-    text — the attached file itself always takes precedence over a URL mentioned
-    in its content.
+    Each context document with an upload_id is matched to the corresponding
+    upload_file step. Matching tries exact filename, then stem similarity, then
+    falls back to the sole doc if there's only one unmatched. Any source_url the
+    planner may have grabbed from inside a document's text is cleared — the
+    attached file always takes precedence.
     """
     docs = [p for p in (context_pages or []) if p.get('upload_id')]
     if not docs:
         return
+    unmatched_docs = list(docs)
     for step in plan.steps:
         if step.type != 'upload_file':
             continue
-        fname = step.title.removeprefix('File:').strip().lower()
-        match = next((d for d in docs if (d.get('filename', '').lower() == fname)), None)
-        if not match and len(docs) == 1:
-            match = docs[0]
+        step_fname = step.title.removeprefix('File:').strip()
+        step_stem = Path(step_fname).stem.lower().replace('-', ' ').replace('_', ' ')
+
+        # 1. Exact filename match (case-insensitive)
+        match = next((d for d in unmatched_docs
+                      if d.get('filename', '').lower() == step_fname.lower()), None)
+        # 2. Stem similarity: "report" matches "report.pdf"
+        if not match:
+            match = next((d for d in unmatched_docs
+                          if Path(d.get('filename', '')).stem.lower().replace('-', ' ').replace('_', ' ')
+                          == step_stem), None)
+        # 3. Only one remaining unmatched doc — use it
+        if not match and len(unmatched_docs) == 1:
+            match = unmatched_docs[0]
+
         if match:
             step.upload_id = match['upload_id']
             step.source_url = None
+            unmatched_docs = [d for d in unmatched_docs if d is not match]
 
 
 # ─── CONNECTION MANAGER ROUTES ────────────────────────────────────────────────
@@ -405,8 +417,8 @@ def _extract_text_from_file(filename: str, file_bytes: bytes) -> str:
     raise ValueError(f'Unsupported file type: {ext}')
 
 
-def _fetch_url_text(url: str, timeout: int = 10, max_bytes: int = 1_048_576) -> tuple[str, str]:
-    """Fetch URL and return (title, text). Raises on error."""
+def _fetch_url_text(url: str, timeout: int = 10, max_bytes: int = 1_048_576) -> tuple[str, str, bytes, str]:
+    """Fetch URL and return (title, text, raw_bytes, content_type). Raises on error."""
     import requests as req_lib
     resp = req_lib.get(url, timeout=timeout, stream=True,
                        headers={'User-Agent': 'WikiGen/3.0'})
@@ -436,7 +448,7 @@ def _fetch_url_text(url: str, timeout: int = 10, max_bytes: int = 1_048_576) -> 
     else:
         text = raw.decode('utf-8', errors='replace')
         page_title = url.rsplit('/', 1)[-1] or url
-    return page_title, text
+    return page_title, text, raw, content_type
 
 
 @app.route('/api/upload_document', methods=['POST'])
@@ -475,11 +487,19 @@ def fetch_url():
     if not url.startswith(('http://', 'https://')):
         return jsonify({'error': 'URL must start with http:// or https://'}), 400
     try:
-        title, text = _fetch_url_text(url)
+        title, text, raw_bytes, content_type = _fetch_url_text(url)
     except Exception as e:
         return jsonify({'error': f'Failed to fetch URL: {e}'}), 500
     text = text.strip()[:50000]
-    return jsonify({'title': title, 'content': text, 'source_url': url, 'is_document': True})
+    # Derive a filename from the URL path for wiki upload purposes
+    url_filename = url.rsplit('/', 1)[-1].split('?')[0] or 'document'
+    if not Path(url_filename).suffix:
+        url_filename += '.html'
+    # Save raw bytes so the file can be wiki-uploaded later (e.g. PDF from URL)
+    upload_id = uuid.uuid4().hex
+    (UPLOADS_DIR / upload_id).write_bytes(raw_bytes)
+    return jsonify({'title': title, 'content': text, 'source_url': url,
+                    'filename': url_filename, 'upload_id': upload_id, 'is_document': True})
 
 
 # ─── AGENT PLAN ROUTES ────────────────────────────────────────────────────────
