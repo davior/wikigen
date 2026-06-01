@@ -1,6 +1,9 @@
+import io
 import json
+import mimetypes
 import os
 import queue
+import re
 import threading
 import uuid
 import dataclasses
@@ -174,6 +177,7 @@ def _plan_from_disk(plan_id: str) -> OperationPlan | None:
             diff=s.get('diff'),
             image_file=s.get('image_file'),
             commons_url=s.get('commons_url'),
+            source_url=s.get('source_url'),
         ))
     return plan
 
@@ -351,6 +355,98 @@ def wiki_rewrite():
     new_content = agent._edit_page_content(title, content, instruction)
     diff = _make_diff(content, new_content)
     return jsonify({'content': new_content, 'diff': diff})
+
+
+# ─── DOCUMENT UPLOAD & URL FETCH ─────────────────────────────────────────────
+
+def _extract_text_from_file(filename: str, file_bytes: bytes) -> str:
+    ext = Path(filename).suffix.lower()
+    if ext in ('.txt', '.md'):
+        return file_bytes.decode('utf-8', errors='replace')
+    if ext in ('.html', '.htm'):
+        from bs4 import BeautifulSoup
+        return BeautifulSoup(file_bytes, 'lxml').get_text(separator='\n')
+    if ext == '.pdf':
+        import pymupdf
+        doc = pymupdf.open(stream=file_bytes, filetype='pdf')
+        return '\n\n'.join(page.get_text() for page in doc)
+    if ext == '.docx':
+        from docx import Document
+        doc = Document(io.BytesIO(file_bytes))
+        return '\n\n'.join(p.text for p in doc.paragraphs if p.text.strip())
+    raise ValueError(f'Unsupported file type: {ext}')
+
+
+def _fetch_url_text(url: str, timeout: int = 10, max_bytes: int = 1_048_576) -> tuple[str, str]:
+    """Fetch URL and return (title, text). Raises on error."""
+    import requests as req_lib
+    resp = req_lib.get(url, timeout=timeout, stream=True,
+                       headers={'User-Agent': 'WikiGen/3.0'})
+    resp.raise_for_status()
+    raw = b''
+    for chunk in resp.iter_content(65536):
+        raw += chunk
+        if len(raw) >= max_bytes:
+            raw = raw[:max_bytes]
+            break
+    content_type = resp.headers.get('Content-Type', '')
+    if 'html' in content_type:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(raw, 'lxml')
+        title_tag = soup.find('title')
+        page_title = title_tag.get_text(strip=True) if title_tag else url
+        for tag in soup(['script', 'style', 'nav', 'footer', 'aside']):
+            tag.decompose()
+        content_el = soup.find('main') or soup.find('article') or soup.find('body') or soup
+        text = content_el.get_text(separator='\n', strip=True)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+    elif 'pdf' in content_type:
+        import pymupdf
+        doc = pymupdf.open(stream=raw, filetype='pdf')
+        text = '\n\n'.join(page.get_text() for page in doc)
+        page_title = url.rsplit('/', 1)[-1] or url
+    else:
+        text = raw.decode('utf-8', errors='replace')
+        page_title = url.rsplit('/', 1)[-1] or url
+    return page_title, text
+
+
+@app.route('/api/upload_document', methods=['POST'])
+def upload_document():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+    f = request.files['file']
+    filename = f.filename or 'document'
+    allowed_exts = {'.txt', '.md', '.html', '.htm', '.pdf', '.docx'}
+    ext = Path(filename).suffix.lower()
+    if ext not in allowed_exts:
+        return jsonify({'error': f'Unsupported file type: {ext}. Allowed: {", ".join(sorted(allowed_exts))}'}), 400
+    file_bytes = f.read()
+    if len(file_bytes) > 10_485_760:
+        return jsonify({'error': 'File too large (max 10 MB)'}), 400
+    try:
+        text = _extract_text_from_file(filename, file_bytes)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    text = text.strip()[:50000]
+    title = Path(filename).stem.replace('-', ' ').replace('_', ' ')
+    return jsonify({'title': title, 'content': text, 'filename': filename, 'is_document': True})
+
+
+@app.route('/api/fetch_url', methods=['POST'])
+def fetch_url():
+    body = request.json or {}
+    url = body.get('url', '').strip()
+    if not url:
+        return jsonify({'error': 'url required'}), 400
+    if not url.startswith(('http://', 'https://')):
+        return jsonify({'error': 'URL must start with http:// or https://'}), 400
+    try:
+        title, text = _fetch_url_text(url)
+    except Exception as e:
+        return jsonify({'error': f'Failed to fetch URL: {e}'}), 500
+    text = text.strip()[:50000]
+    return jsonify({'title': title, 'content': text, 'source_url': url, 'is_document': True})
 
 
 # ─── AGENT PLAN ROUTES ────────────────────────────────────────────────────────

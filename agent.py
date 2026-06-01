@@ -2,6 +2,7 @@ import concurrent.futures
 import json
 import queue
 import re
+import requests
 import threading
 import time
 import uuid
@@ -9,6 +10,7 @@ import difflib
 import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, Callable
 
 from wiki_client import WikiClient
@@ -35,6 +37,7 @@ Step types you may produce:
 - find_replace: Bulk text replacement across the wiki; title = "*"; describe find/replace pairs in description
 - ensure_disambig: Create a redirect or disambiguation page for an abbreviation
 - add_image: Source an image from Wikimedia Commons and embed it into an existing page
+- upload_file: Upload a document or file to the wiki file namespace; title = "File:filename.ext"; set source_url for remote files; uploaded files can be referenced as [[File:filename.ext]] in page content
 
 When describing content to create or edit, be specific. The description will be used as the sole instruction for content generation, so include:
 - Topic scope and angle
@@ -59,9 +62,10 @@ Return a JSON object with this exact structure:
   "steps": [
     {
       "id": "s1",
-      "type": "create|edit|delete|move|find_replace|ensure_disambig|add_image",
+      "type": "create|edit|delete|move|find_replace|ensure_disambig|add_image|upload_file",
       "title": "Page Title",
       "from_title": "Source Title",
+      "source_url": "https://example.com/file.pdf",
       "description": "detailed instructions for this step",
       "summary": "short one-line description shown to the user",
       "depends_on": []
@@ -74,6 +78,7 @@ Notes:
 - For move: title = destination, from_title = source
 - For find_replace: title = "*", description = the pairs to find and replace
 - For delete: description = reason for deletion
+- For upload_file: title = "File:filename.ext", source_url = remote URL to fetch and upload (optional if file is already in context), description = file caption/description; after uploading use [[File:filename.ext]] to reference the file in page content
 - NEVER produce a create step for a title that appears in the SITE INDEX — it already exists
 - Use depends_on when order matters (e.g. create pages before deleting source)"""
 
@@ -105,6 +110,7 @@ class OperationStep:
     diff: Optional[str] = None
     image_file: Optional[str] = None
     commons_url: Optional[str] = None
+    source_url: Optional[str] = None
 
     def to_dict(self):
         return dataclasses.asdict(self)
@@ -289,6 +295,7 @@ class WikiAgent:
         self.cancel_event = threading.Event()
         self._stream_callback: Optional[Callable] = None
         self._existing_titles: set[str] = set(site_index.keys()) if site_index else set()
+        self._context_docs: list[dict] = context_pages or []
 
         blocks = [{
             'type': 'text',
@@ -324,8 +331,9 @@ class WikiAgent:
         if not context_pages:
             return ''
         lines = []
-        referenced = [p for p in context_pages if p.get('is_referenced')]
-        general = [p for p in context_pages if not p.get('is_referenced')]
+        documents = [p for p in context_pages if p.get('is_document')]
+        referenced = [p for p in context_pages if p.get('is_referenced') and not p.get('is_document')]
+        general = [p for p in context_pages if not p.get('is_referenced') and not p.get('is_document')]
         if referenced:
             lines.append('REFERENCED WIKI PAGES (use their content as source material):')
             for p in referenced:
@@ -334,6 +342,11 @@ class WikiAgent:
             lines.append('ADDITIONAL CONTEXT PAGES:')
             for p in general[:5]:
                 lines.append(f"=== {p['title']} ===\n{p.get('content', '')}")
+        if documents:
+            lines.append('UPLOADED DOCUMENTS / FETCHED URLS (use as reference material):')
+            for p in documents[:5]:
+                src = f" (source: {p['source_url']})" if p.get('source_url') else ''
+                lines.append(f"=== {p['title']}{src} ===\n{p.get('content', '')}")
         return '\n\n'.join(lines) + '\n\n---\n\n'
 
     def _emit(self, event: dict):
@@ -356,6 +369,40 @@ class WikiAgent:
 
     def generate_plan(self, instruction: str) -> OperationPlan:
         plan = OperationPlan(connection_id=self.connection_id, operation_type='auto')
+
+        # Auto-fetch URLs found in the instruction and add as context
+        url_pattern = re.compile(r'https?://[^\s,>"\]]+')
+        instruction_urls = url_pattern.findall(instruction)
+        if instruction_urls:
+            fetched_docs = []
+            for url in instruction_urls[:3]:
+                try:
+                    resp = requests.get(url, timeout=10, headers={'User-Agent': 'WikiGen/3.0'})
+                    resp.raise_for_status()
+                    content_type = resp.headers.get('Content-Type', '')
+                    if 'html' in content_type:
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(resp.content, 'lxml')
+                        title_tag = soup.find('title')
+                        title = title_tag.get_text(strip=True) if title_tag else url
+                        for tag in soup(['script', 'style', 'nav', 'footer', 'aside']):
+                            tag.decompose()
+                        content_el = soup.find('main') or soup.find('article') or soup.find('body') or soup
+                        text = content_el.get_text(separator='\n', strip=True)[:20000]
+                    else:
+                        text = resp.text.strip()[:20000]
+                        title = url.rsplit('/', 1)[-1] or url
+                    fetched_docs.append({'title': title, 'content': text, 'source_url': url, 'is_document': True})
+                except Exception:
+                    pass
+            if fetched_docs:
+                url_ctx = self._build_context_prefix(fetched_docs)
+                if url_ctx:
+                    self._system_blocks.append({
+                        'type': 'text',
+                        'text': url_ctx,
+                        'cache_control': {'type': 'ephemeral'},
+                    })
 
         # Build user message: auto-fetch referenced pages + links, then instruction
         parts = []
@@ -411,6 +458,7 @@ class WikiAgent:
                 description=step_data.get('description', ''),
                 summary=step_data.get('summary', step_data.get('description', '')),
                 depends_on=step_data.get('depends_on', []),
+                source_url=step_data.get('source_url') or None,
             )
             plan.steps.append(step)
             self._emit({'type': 'step', 'step': step.to_dict()})
@@ -579,6 +627,41 @@ class WikiAgent:
             self._prepare_add_image_content(step)
         return self.wiki.write_page(step.title, step.content, f'Add image: {step.image_file}')
 
+    def _execute_upload_file_step(self, step: OperationStep) -> dict:
+        filename = step.title.removeprefix('File:')
+        description = step.description or step.summary
+
+        if step.source_url:
+            # Try wiki-side remote URL upload first
+            result = self.wiki.upload_file_from_url(filename, step.source_url, description)
+            if not result.get('success') and ('copyupload' in result.get('error', '') or
+                                               'upload-dialog-disabled' in result.get('error', '')):
+                # Fallback: fetch locally then upload as bytes
+                try:
+                    resp = requests.get(step.source_url, timeout=15,
+                                        headers={'User-Agent': 'WikiGen/3.0'})
+                    resp.raise_for_status()
+                    import mimetypes
+                    mime = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+                    result = self.wiki.upload_file(filename, resp.content, mime, description)
+                except Exception as e:
+                    result = {'success': False, 'error': str(e)}
+            return result
+
+        # Look for a matching document in context by filename or title
+        ctx_doc = next((
+            p for p in self._context_docs
+            if p.get('filename') == filename or p.get('title') == filename
+               or p.get('title') == Path(filename).stem.replace('-', ' ').replace('_', ' ')
+        ), None)
+        if ctx_doc:
+            import mimetypes
+            content_bytes = ctx_doc.get('content', '').encode('utf-8')
+            mime = mimetypes.guess_type(filename)[0] or 'text/plain'
+            return self.wiki.upload_file(filename, content_bytes, mime, description)
+
+        return {'success': False, 'error': 'No source URL or matching context document found for upload_file step'}
+
     def generate_step_preview(self, step: OperationStep) -> None:
         """Populate step.content (and diff/summary) without writing to wiki. Raises on failure."""
         instruction = step.description or step.summary
@@ -652,6 +735,9 @@ class WikiAgent:
 
             elif step.type == 'ensure_disambig':
                 result = self._execute_ensure_disambig_step(step)
+
+            elif step.type == 'upload_file':
+                result = self._execute_upload_file_step(step)
 
             else:
                 result = {'success': False, 'error': f'Unknown step type: {step.type}'}
@@ -776,6 +862,8 @@ class WikiAgent:
                 result = self.wiki.move_page(step.from_title, step.title, step.summary)
             elif step.type == 'delete':
                 result = self.wiki.delete_page(step.title, step.summary)
+            elif step.type == 'upload_file':
+                result = self._execute_upload_file_step(step)
             else:
                 result = {'success': False, 'error': f'Unknown step type: {step.type}'}
             step.status = 'done' if result.get('success') else 'failed'
