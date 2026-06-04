@@ -218,7 +218,8 @@ wikigen/
 - **Recursive generation** is the only async operation — it runs in a background thread and streams steps via Server-Sent Events. All other operations block until complete.
 - **Rate limiting** — WikiGen enforces a 1-second minimum between wiki write operations to stay within MediaWiki's default bot rate limit.
 - **CSRF tokens** — Automatically refreshed on `badtoken` errors; no manual intervention needed.
-- **Prompt caching** — The Anthropic system prompt uses `cache_control: ephemeral`, giving ~90% cost reduction on repeated calls within the same 5-minute window.
+- **Prompt caching** — The Anthropic system prompt uses `cache_control: ephemeral`. The stable blocks (planner rules + site index) are cached for **1 hour**; per-request context keeps the default 5-minute TTL — giving ~90% cost reduction on repeated calls.
+- **Site index** — The list of all pages (with categories and short descriptions) is built once and cached in-process, persisted to a JSON page in the wiki (`User:<bot>/wikigen-index.json`, override per connection with `index_page`). Freshness is maintained with a single `recentchanges` high-water-mark check plus incremental refresh of only the changed pages, instead of re-scanning `allpages` on every operation. See `site_index.py`.
 - **Plan persistence** — Plans are saved to `plans/<id>.json` on completion and survive server restarts.
 
 ---

@@ -179,25 +179,40 @@ def _make_diff(old: str, new: str) -> str:
     ))
 
 
-def _format_site_index(pages_with_cats: dict[str, list[str]]) -> str:
-    if not pages_with_cats:
+def _format_site_index(pages: dict) -> str:
+    """Render the site index compactly for the planner's cached system block.
+
+    Accepts either the legacy {title: [categories]} shape or the richer
+    {title: {'c': [categories], 'd': description}} shape. Pages are grouped one
+    line per category, separated by ' · ', with "title — description" shown
+    wherever a description is known. The dense layout keeps the (prompt-cached)
+    block small while still conveying whole-site context.
+    """
+    if not pages:
         return 'SITE INDEX: (empty wiki — no pages yet)'
-    lines = [f'SITE INDEX: {len(pages_with_cats)} pages\n']
+
+    def _cats_desc(value) -> tuple[list[str], str]:
+        if isinstance(value, dict):
+            return (value.get('c') or []), (value.get('d') or '').strip()
+        return (value or []), ''
+
     by_cat: dict[str, list[str]] = {}
-    uncategorized = []
-    for title, cats in pages_with_cats.items():
+    uncategorized: list[str] = []
+    for title, value in pages.items():
+        cats, desc = _cats_desc(value)
+        label = f'{title} — {desc}' if desc else title
         if cats:
             for cat in cats:
-                by_cat.setdefault(cat, []).append(title)
+                by_cat.setdefault(cat, []).append(label)
         else:
-            uncategorized.append(title)
-    for cat, titles in sorted(by_cat.items()):
-        lines.append(f'[{cat}]')
-        lines.extend(f'  {t}' for t in sorted(titles))
-        lines.append('')
+            uncategorized.append(label)
+
+    lines = [f'SITE INDEX: {len(pages)} pages '
+             '(grouped by category; "title — description" where known)']
+    for cat in sorted(by_cat):
+        lines.append(f'{cat}: {" · ".join(sorted(by_cat[cat]))}')
     if uncategorized:
-        lines.append('[Uncategorized]')
-        lines.extend(f'  {t}' for t in sorted(uncategorized))
+        lines.append(f'(uncategorized): {" · ".join(sorted(uncategorized))}')
     return '\n'.join(lines)
 
 
@@ -321,16 +336,20 @@ class WikiAgent:
         self._context_docs: list[dict] = context_pages or []
         self._uploads_dir = uploads_dir
 
+        # The planner prefix and the site index change rarely, so cache them for
+        # an hour — repeat planning/execution sessions hit the cache instead of
+        # re-paying for these (large, stable) blocks. Per-request context blocks
+        # below keep the default 5-minute TTL.
         blocks = [{
             'type': 'text',
             'text': PLANNER_PREFIX + ('\n\n' + system_prompt if system_prompt else ''),
-            'cache_control': {'type': 'ephemeral'},
+            'cache_control': {'type': 'ephemeral', 'ttl': '1h'},
         }]
         if site_index:
             blocks.append({
                 'type': 'text',
                 'text': _format_site_index(site_index),
-                'cache_control': {'type': 'ephemeral'},
+                'cache_control': {'type': 'ephemeral', 'ttl': '1h'},
             })
         if context_pages:
             ctx_text = self._build_context_prefix(context_pages)
