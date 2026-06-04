@@ -721,12 +721,44 @@ function renderConnectionsModal() {
       <div style="flex:1">
         <div class="conn-name">${escapeHtml(c.name)}</div>
         <div class="conn-url">${escapeHtml(c.wiki_url)}</div>
+        <div class="conn-index" id="connIndex-${c.id}" style="font-size:9px;color:var(--text3);font-family:'IBM Plex Mono',monospace;margin-top:2px"></div>
       </div>
       ${!isActive ? `<button class="step-btn step-btn-approve" onclick="activateConn('${c.id}')">ACTIVATE</button>` : '<span style="font-size:9px;color:var(--accent3);font-family:\'IBM Plex Mono\',monospace">ACTIVE</span>'}
+      <button class="step-btn" id="connReindex-${c.id}" style="background:rgba(0,170,255,0.1);color:var(--accent3,#0af);border:1px solid rgba(0,170,255,0.2)" onclick="reindexConn('${c.id}')" title="Rebuild the frozen site index from the wiki">REINDEX</button>
       <button class="step-btn" style="background:rgba(255,170,0,0.1);color:var(--warn);border:1px solid rgba(255,170,0,0.2)" onclick="editConn('${c.id}')">EDIT</button>
       <button class="step-btn step-btn-reject" onclick="deleteConn('${c.id}')">DEL</button>
     </div>`;
   }).join('');
+  connections.forEach(c => loadIndexStatus(c.id));
+}
+
+function loadIndexStatus(id) {
+  fetch(`${API_BASE}/api/connections/${id}/index/status`)
+    .then(r => r.json())
+    .then(s => {
+      const el = document.getElementById(`connIndex-${id}`);
+      if (!el || s.error) return;
+      if (!s.exists) { el.textContent = 'index: not built yet (auto-builds on first use)'; return; }
+      let txt = `index: ${s.page_count} pages`;
+      if (s.pending_count) txt += ` · +${s.pending_count} this session`;
+      if (s.stale) { txt += ' · ⚠ wiki changed since last refresh'; el.style.color = 'var(--warn)'; }
+      else { el.style.color = 'var(--text3)'; }
+      el.textContent = txt;
+    })
+    .catch(() => {});
+}
+
+function reindexConn(id) {
+  const btn = document.getElementById(`connReindex-${id}`);
+  if (btn) { btn.disabled = true; btn.textContent = '...'; }
+  fetch(`${API_BASE}/api/connections/${id}/index/refresh`, { method: 'POST' })
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { showToast(d.error, 'error'); }
+      else { showToast(`Site index rebuilt: ${d.page_count} pages`, 'success'); }
+    })
+    .catch(() => showToast('Reindex failed', 'error'))
+    .finally(() => { if (btn) { btn.disabled = false; btn.textContent = 'REINDEX'; } loadIndexStatus(id); });
 }
 
 function activateConn(id) {

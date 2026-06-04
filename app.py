@@ -33,6 +33,7 @@ PLANS_DIR.mkdir(exist_ok=True)
 ARCHIVED_PLANS_FILE = DATA_DIR / 'archived_plans.json'
 UPLOADS_DIR = DATA_DIR / 'uploads'
 UPLOADS_DIR.mkdir(exist_ok=True)
+site_index.set_storage_dir(DATA_DIR)
 
 anthropic_client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY', ''))
 
@@ -157,10 +158,11 @@ def _append_history(plan: OperationPlan, results: list[dict]):
 
 
 def _update_index_after_execution(client: WikiClient, conn: dict, plan: OperationPlan):
-    """Reflect a plan's completed steps into the cached/persisted site index.
+    """Record a plan's completed steps as pending session changes.
 
-    Keeps the index current immediately, without waiting for the next
-    recentchanges check or paying for a full rebuild.
+    The frozen site index is left untouched (so the planner's prompt cache stays
+    warm); these pages are surfaced to the planner via the uncached "recently
+    created this session" tail until the user explicitly refreshes the index.
     """
     changes = {'created': [], 'edited': [], 'deleted': [], 'moved': []}
     for s in plan.steps:
@@ -176,7 +178,7 @@ def _update_index_after_execution(client: WikiClient, conn: dict, plan: Operatio
             changes['moved'].append({'from': s.from_title, 'to': s.title})
     if any(changes.values()):
         try:
-            site_index.apply_local_changes(conn['id'], client, conn.get('index_page'), changes)
+            site_index.record_session_changes(conn['id'], changes)
         except Exception:
             pass
 
@@ -280,6 +282,7 @@ def add_connection():
         'password': body.get('password', ''),
         'system_prompt': body.get('system_prompt', ''),
         'chips': body.get('chips', []),
+        'index_page': body.get('index_page', ''),
     }
     data['connections'].append(conn)
     if not data.get('active_connection_id'):
@@ -329,6 +332,35 @@ def test_connection(conn_id: str):
     if client and client._connected:
         return jsonify({'connected': True})
     return jsonify({'connected': False, 'error': 'Authentication failed'})
+
+
+@app.route('/api/connections/<conn_id>/index/status', methods=['GET'])
+def index_status(conn_id: str):
+    conn = _get_connection_by_id(conn_id)
+    if not conn:
+        return jsonify({'error': 'Not found'}), 404
+    client = get_wiki_client(conn_id)
+    if not client:
+        return jsonify({'error': 'Wiki connection failed'}), 400
+    try:
+        return jsonify(site_index.index_status(client, conn_id, conn.get('index_page')))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/connections/<conn_id>/index/refresh', methods=['POST'])
+def refresh_index(conn_id: str):
+    conn = _get_connection_by_id(conn_id)
+    if not conn:
+        return jsonify({'error': 'Not found'}), 404
+    client = get_wiki_client(conn_id)
+    if not client:
+        return jsonify({'error': 'Wiki connection failed'}), 400
+    try:
+        result = site_index.refresh_index(client, conn_id, conn.get('index_page'))
+        return jsonify({'success': True, **result})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 # ─── LEGACY CHECK CONNECTION ──────────────────────────────────────────────────
@@ -443,7 +475,8 @@ def wiki_rewrite():
     else:
         index = _site_index(client, conn)
 
-    agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'], site_index=index)
+    agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
+                      site_index=index, recent_pages=site_index.get_recent_pages(conn['id']))
     new_content = agent._edit_page_content(title, content, instruction)
     diff = _make_diff(content, new_content)
     return jsonify({'content': new_content, 'diff': diff})
@@ -595,6 +628,7 @@ def agent_plan():
         agent = WikiAgent(
             client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
             site_index=index, context_pages=context_pages,
+            recent_pages=site_index.get_recent_pages(conn['id']),
         )
         agent._stream_callback = lambda evt: job_q.put(evt)
         agent.cancel_event = cancel_ev
@@ -753,7 +787,7 @@ def step_preview_route():
 
     agent = WikiAgent(
         client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
-        site_index=index,
+        site_index=index, recent_pages=site_index.get_recent_pages(conn['id']),
     )
     try:
         agent.generate_step_preview(step)
@@ -871,6 +905,7 @@ def execute_plan_route():
         agent = WikiAgent(
             client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
             site_index=index, uploads_dir=UPLOADS_DIR,
+            recent_pages=site_index.get_recent_pages(conn['id']),
         )
         agent._stream_callback = lambda evt: exec_q.put(evt)
         agent.cancel_event = cancel_ev

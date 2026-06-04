@@ -326,13 +326,21 @@ def _split_sections(content: str) -> list[dict]:
 class WikiAgent:
     def __init__(self, wiki: WikiClient, anthropic_client, system_prompt: str,
                  connection_id: str, site_index: dict | None = None,
-                 context_pages: list | None = None, uploads_dir=None):
+                 context_pages: list | None = None, uploads_dir=None,
+                 recent_pages: dict | None = None):
         self.wiki = wiki
         self.ai = anthropic_client
         self.connection_id = connection_id
         self.cancel_event = threading.Event()
         self._stream_callback: Optional[Callable] = None
-        self._existing_titles: set[str] = set(site_index.keys()) if site_index else set()
+        # Pages created/updated this session that aren't in the frozen site index
+        # yet. They feed the uncached prompt tail (see generate_plan) so the model
+        # knows they exist, and they count as "existing" for de-duplication and
+        # link classification — without disturbing the cached site-index block.
+        self._recent_pages: dict = recent_pages or {}
+        existing = set(site_index.keys()) if site_index else set()
+        existing |= set(self._recent_pages.keys())
+        self._existing_titles: set[str] = existing
         self._context_docs: list[dict] = context_pages or []
         self._uploads_dir = uploads_dir
 
@@ -482,6 +490,15 @@ class WikiAgent:
                     ref_sections.append(section)
             if ref_sections:
                 parts.append('REFERENCED PAGES:\n\n' + '\n\n'.join(ref_sections))
+
+        if self._recent_pages:
+            recent_lines = ['RECENTLY CREATED OR UPDATED THIS SESSION '
+                            '(these already exist — do NOT recreate them; they are '
+                            'not yet listed in the SITE INDEX above):']
+            for title in sorted(self._recent_pages):
+                desc = (self._recent_pages[title] or {}).get('d', '')
+                recent_lines.append(f'  - {title}' + (f' — {desc}' if desc else ''))
+            parts.append('\n'.join(recent_lines))
 
         parts.append(f'INSTRUCTION: {instruction}')
         parts.append(PLAN_SCHEMA)
