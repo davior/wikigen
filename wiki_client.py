@@ -169,6 +169,22 @@ class WikiClient:
             params.update(data['continue'])
         return result
 
+    def get_recentchanges_head(self) -> int:
+        """Return the rcid of the most recent main-namespace change (0 if none).
+
+        This is a single cheap call used as a high-water mark to decide whether a
+        cached site index is still fresh, instead of re-listing every page.
+        """
+        self._ensure_connected()
+        r = self._session.get(self._url, params={
+            'action': 'query', 'list': 'recentchanges',
+            'rcnamespace': 0, 'rclimit': 1, 'rcprop': 'ids',
+            'rctype': 'edit|new|log', 'format': 'json',
+        })
+        r.raise_for_status()
+        changes = r.json().get('query', {}).get('recentchanges', [])
+        return changes[0].get('rcid', 0) if changes else 0
+
     def search(self, term: str, limit: int = 50) -> list[dict]:
         self._ensure_connected()
         r = self._session.get(self._url, params={

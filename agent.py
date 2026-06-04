@@ -180,25 +180,40 @@ def _make_diff(old: str, new: str) -> str:
     ))
 
 
-def _format_site_index(pages_with_cats: dict[str, list[str]]) -> str:
-    if not pages_with_cats:
+def _format_site_index(pages: dict) -> str:
+    """Render the site index compactly for the planner's cached system block.
+
+    Accepts either the legacy {title: [categories]} shape or the richer
+    {title: {'c': [categories], 'd': description}} shape. Pages are grouped one
+    line per category, separated by ' · ', with "title — description" shown
+    wherever a description is known. The dense layout keeps the (prompt-cached)
+    block small while still conveying whole-site context.
+    """
+    if not pages:
         return 'SITE INDEX: (empty wiki — no pages yet)'
-    lines = [f'SITE INDEX: {len(pages_with_cats)} pages\n']
+
+    def _cats_desc(value) -> tuple[list[str], str]:
+        if isinstance(value, dict):
+            return (value.get('c') or []), (value.get('d') or '').strip()
+        return (value or []), ''
+
     by_cat: dict[str, list[str]] = {}
-    uncategorized = []
-    for title, cats in pages_with_cats.items():
+    uncategorized: list[str] = []
+    for title, value in pages.items():
+        cats, desc = _cats_desc(value)
+        label = f'{title} — {desc}' if desc else title
         if cats:
             for cat in cats:
-                by_cat.setdefault(cat, []).append(title)
+                by_cat.setdefault(cat, []).append(label)
         else:
-            uncategorized.append(title)
-    for cat, titles in sorted(by_cat.items()):
-        lines.append(f'[{cat}]')
-        lines.extend(f'  {t}' for t in sorted(titles))
-        lines.append('')
+            uncategorized.append(label)
+
+    lines = [f'SITE INDEX: {len(pages)} pages '
+             '(grouped by category; "title — description" where known)']
+    for cat in sorted(by_cat):
+        lines.append(f'{cat}: {" · ".join(sorted(by_cat[cat]))}')
     if uncategorized:
-        lines.append('[Uncategorized]')
-        lines.extend(f'  {t}' for t in sorted(uncategorized))
+        lines.append(f'(uncategorized): {" · ".join(sorted(uncategorized))}')
     return '\n'.join(lines)
 
 
@@ -312,26 +327,38 @@ def _split_sections(content: str) -> list[dict]:
 class WikiAgent:
     def __init__(self, wiki: WikiClient, anthropic_client, system_prompt: str,
                  connection_id: str, site_index: dict | None = None,
-                 context_pages: list | None = None, uploads_dir=None):
+                 context_pages: list | None = None, uploads_dir=None,
+                 recent_pages: dict | None = None):
         self.wiki = wiki
         self.ai = anthropic_client
         self.connection_id = connection_id
         self.cancel_event = threading.Event()
         self._stream_callback: Optional[Callable] = None
-        self._existing_titles: set[str] = set(site_index.keys()) if site_index else set()
+        # Pages created/updated this session that aren't in the frozen site index
+        # yet. They feed the uncached prompt tail (see generate_plan) so the model
+        # knows they exist, and they count as "existing" for de-duplication and
+        # link classification — without disturbing the cached site-index block.
+        self._recent_pages: dict = recent_pages or {}
+        existing = set(site_index.keys()) if site_index else set()
+        existing |= set(self._recent_pages.keys())
+        self._existing_titles: set[str] = existing
         self._context_docs: list[dict] = context_pages or []
         self._uploads_dir = uploads_dir
 
+        # The planner prefix and the site index change rarely, so cache them for
+        # an hour — repeat planning/execution sessions hit the cache instead of
+        # re-paying for these (large, stable) blocks. Per-request context blocks
+        # below keep the default 5-minute TTL.
         blocks = [{
             'type': 'text',
             'text': PLANNER_PREFIX + ('\n\n' + system_prompt if system_prompt else ''),
-            'cache_control': {'type': 'ephemeral'},
+            'cache_control': {'type': 'ephemeral', 'ttl': '1h'},
         }]
         if site_index:
             blocks.append({
                 'type': 'text',
                 'text': _format_site_index(site_index),
-                'cache_control': {'type': 'ephemeral'},
+                'cache_control': {'type': 'ephemeral', 'ttl': '1h'},
             })
         if context_pages:
             ctx_text = self._build_context_prefix(context_pages)
@@ -464,6 +491,15 @@ class WikiAgent:
                     ref_sections.append(section)
             if ref_sections:
                 parts.append('REFERENCED PAGES:\n\n' + '\n\n'.join(ref_sections))
+
+        if self._recent_pages:
+            recent_lines = ['RECENTLY CREATED OR UPDATED THIS SESSION '
+                            '(these already exist — do NOT recreate them; they are '
+                            'not yet listed in the SITE INDEX above):']
+            for title in sorted(self._recent_pages):
+                desc = (self._recent_pages[title] or {}).get('d', '')
+                recent_lines.append(f'  - {title}' + (f' — {desc}' if desc else ''))
+            parts.append('\n'.join(recent_lines))
 
         parts.append(f'INSTRUCTION: {instruction}')
         parts.append(PLAN_SCHEMA)
