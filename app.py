@@ -318,6 +318,22 @@ def publish():
     if not client:
         return jsonify({'error': 'Wiki connection failed'}), 500
     result = client.write_page(body['title'], body['content'], body.get('summary', ''))
+
+    # If step belongs to a plan, mark it as done and save
+    if result.get('success'):
+        plan_id = body.get('plan_id')
+        step_id = body.get('step_id')
+        if plan_id and step_id:
+            plan = _plans.get(plan_id)
+            if not plan:
+                plan = _plan_from_disk(plan_id)
+            if plan:
+                step = next((s for s in plan.steps if s.id == step_id), None)
+                if step:
+                    step.status = 'done'
+                    step.error = None
+                    _save_plan_to_disk(plan)
+
     return jsonify(result)
 
 
@@ -717,6 +733,39 @@ def step_preview_route():
         return jsonify({'success': True, 'step': step.to_dict()})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e), 'step': step.to_dict()})
+
+
+@app.route('/api/agent/step/approve', methods=['POST'])
+def approve_step_route():
+    """Approve a step and clear any error state from persistent storage."""
+    body = request.json or {}
+    plan_id = body.get('plan_id')
+    step_id = body.get('step_id')
+
+    if not plan_id or not step_id:
+        return jsonify({'success': False, 'error': 'Missing plan_id or step_id'}), 400
+
+    # Load plan from memory or disk
+    plan = _plans.get(plan_id)
+    if not plan:
+        plan = _plan_from_disk(plan_id)
+    if not plan:
+        return jsonify({'success': False, 'error': 'Plan not found'}), 404
+
+    # Find step
+    step = next((s for s in plan.steps if s.id == step_id), None)
+    if not step:
+        return jsonify({'success': False, 'error': 'Step not found'}), 404
+
+    # Clear error state
+    step.status = 'approved'
+    step.error = None
+
+    # Persist to disk
+    _plans[plan_id] = plan
+    _save_plan_to_disk(plan)
+
+    return jsonify({'success': True, 'step': step.to_dict()})
 
 
 @app.route('/api/agent/execute_step', methods=['POST'])

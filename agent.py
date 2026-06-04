@@ -29,6 +29,11 @@ Analyse the instruction relative to the existing wiki structure and return a str
 
 CRITICAL RULE: The SITE INDEX lists EVERY page that currently exists in this wiki. You MUST NOT produce a 'create' step for any title that already appears in the SITE INDEX. When the user asks for "missing pages", only create steps for pages that are explicitly listed as not existing.
 
+If the user requests creation of a page that already exists in the SITE INDEX:
+- Do NOT create a 'create' step for it
+- Suggest an 'edit' step instead if the user wants to modify the existing page
+- In your description, note which requested pages already exist so the user understands why they were not included
+
 Step types you may produce:
 - create: Create a new page from scratch (ONLY for titles NOT in the SITE INDEX)
 - edit: Modify an existing page (must exist in the index)
@@ -490,6 +495,21 @@ class WikiAgent:
             )
             plan.steps.append(step)
             self._emit({'type': 'step', 'step': step.to_dict()})
+
+        # Filter out 'create' steps for pages that already exist in the site index
+        original_count = len(plan.steps)
+        skipped_creates = []
+        filtered_steps = []
+        for step in plan.steps:
+            if step.type == 'create' and step.title in self._existing_titles:
+                skipped_creates.append(step.title)
+            else:
+                filtered_steps.append(step)
+
+        plan.steps = filtered_steps
+        if skipped_creates:
+            skip_msg = f"\n(Skipped {len(skipped_creates)} create step(s) for existing pages: {', '.join(skipped_creates)})"
+            plan.description = (plan.description or '') + skip_msg
 
         self._emit({'type': 'done', 'plan_id': plan.id})
         return plan

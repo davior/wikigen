@@ -1148,12 +1148,31 @@ function updateStepElement(step) {
   updateExecuteBtn();
 }
 
-function approveStep(stepId, e) {
+async function approveStep(stepId, e) {
   e && e.stopPropagation();
   const step = findStep(stepId);
   if (!step) return;
-  step.status = 'approved';
-  step.error = null;
+
+  try {
+    const resp = await fetch(API_BASE + '/api/agent/step/approve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        plan_id: currentPlan.plan_id,
+        step_id: stepId
+      }),
+    });
+    const data = await resp.json();
+    if (!data.success) {
+      showToast('Approval failed: ' + (data.error || 'Unknown'), 'error');
+      return;
+    }
+    Object.assign(step, data.step);
+  } catch (e) {
+    showToast('Error approving step: ' + e.message, 'error');
+    return;
+  }
+
   updateStepElement(step);
   if (CONTENT_REQUIRED_TYPES.has(step.type) && !step.content && !_generatingSteps.has(stepId)) {
     generateStepContent(stepId);
@@ -1723,12 +1742,20 @@ function publishCurrent() {
   if (!activeEditorPage) return;
   const title = activeEditorPage.title;
   const content = document.getElementById('content-editor').value;
+  const step_id = activeEditorPage.step_id || null;
   showLoading('PUBLISHING...', `Writing "${title}" to wiki`);
 
   fetch(API_BASE + '/api/publish', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title, content, summary: activeEditorPage.summary || 'Published via WikiGen', connection_id: activeConnectionId }),
+    body: JSON.stringify({
+      title,
+      content,
+      summary: activeEditorPage.summary || 'Published via WikiGen',
+      connection_id: activeConnectionId,
+      plan_id: currentPlan ? currentPlan.plan_id : null,
+      step_id: step_id,
+    }),
   })
   .then(r => r.json())
   .then(d => {
@@ -1736,6 +1763,17 @@ function publishCurrent() {
     if (d.success) {
       publishedSet.add(title);
       totalPublished++;
+
+      // Mark plan step as done if this was a plan publication
+      if (step_id && currentPlan) {
+        const step = findStep(step_id);
+        if (step && (step.status === 'approved' || step.status === 'executing')) {
+          step.status = 'done';
+          step.error = null;
+          updateStepElement(step);
+        }
+      }
+
       renderPageList();
       showToast(`Published: ${title}`, 'success');
     } else {
