@@ -422,3 +422,72 @@ class WikiClient:
 
 def _strip_html(text: str) -> str:
     return re.sub(r'<[^>]+>', '', text)
+
+
+def html_to_wikitext(html_content: str, source_url: str = None) -> str:
+    """Convert HTML to MediaWiki wikitext format, preserving structure.
+
+    Args:
+        html_content: Raw HTML string
+        source_url: Optional URL to add as attribution
+
+    Returns:
+        MediaWiki wikitext format string
+    """
+    import html2text
+
+    converter = html2text.HTML2Text()
+    converter.ignore_links = False
+    converter.ignore_images = False
+    converter.body_width = 0
+    converter.unicode_snob = True
+
+    markdown = converter.handle(html_content)
+
+    lines = markdown.split('\n')
+    wikitext_lines = []
+
+    for line in lines:
+        line = line.rstrip()
+
+        if line.startswith('# '):
+            wikitext_lines.append('= ' + line[2:] + ' =')
+        elif line.startswith('## '):
+            wikitext_lines.append('== ' + line[3:] + ' ==')
+        elif line.startswith('### '):
+            wikitext_lines.append('=== ' + line[4:] + ' ===')
+        elif line.startswith('#### '):
+            wikitext_lines.append('==== ' + line[5:] + ' ====')
+        elif line.startswith('##### '):
+            wikitext_lines.append('===== ' + line[6:] + ' =====')
+        elif line.startswith('###### '):
+            wikitext_lines.append('====== ' + line[7:] + ' ======')
+        elif line.startswith('  * '):
+            wikitext_lines.append('** ' + line[4:])
+        elif line.startswith('    * '):
+            wikitext_lines.append('*** ' + line[6:])
+        elif line.startswith('* '):
+            wikitext_lines.append('* ' + line[2:])
+        elif line.startswith('  1. '):
+            wikitext_lines.append('## ' + line[5:])
+        elif line.startswith('    1. '):
+            wikitext_lines.append('### ' + line[7:])
+        elif line.startswith('1. '):
+            wikitext_lines.append('# ' + line[3:])
+        elif line.startswith('> '):
+            wikitext_lines.append(': ' + line[2:])
+        else:
+            converted_line = line
+            converted_line = re.sub(r'\*\*([^*]+)\*\*', r"'''\1'''", converted_line)
+            converted_line = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', r"''\1''", converted_line)
+            converted_line = re.sub(r'_([^_]+)_', r"''\1''", converted_line)
+            converted_line = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'[\2 \1]', converted_line)
+            wikitext_lines.append(converted_line)
+
+    wikitext = '\n'.join(wikitext_lines).strip()
+
+    if source_url:
+        attribution = f"''Extracted from [{source_url}]''\n\n"
+        wikitext = attribution + wikitext
+
+    return wikitext

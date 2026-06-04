@@ -421,8 +421,9 @@ def _extract_text_from_file(filename: str, file_bytes: bytes) -> str:
     if ext in ('.txt', '.md'):
         return file_bytes.decode('utf-8', errors='replace')
     if ext in ('.html', '.htm'):
-        from bs4 import BeautifulSoup
-        return BeautifulSoup(file_bytes, 'lxml').get_text(separator='\n')
+        from wiki_client import html_to_wikitext
+        html_content = file_bytes.decode('utf-8', errors='replace')
+        return html_to_wikitext(html_content)
     if ext == '.pdf':
         import pymupdf
         doc = pymupdf.open(stream=file_bytes, filetype='pdf')
@@ -449,14 +450,14 @@ def _fetch_url_text(url: str, timeout: int = 10, max_bytes: int = 1_048_576) -> 
     content_type = resp.headers.get('Content-Type', '')
     if 'html' in content_type:
         from bs4 import BeautifulSoup
+        from wiki_client import html_to_wikitext
         soup = BeautifulSoup(raw, 'lxml')
         title_tag = soup.find('title')
         page_title = title_tag.get_text(strip=True) if title_tag else url
         for tag in soup(['script', 'style', 'nav', 'footer', 'aside']):
             tag.decompose()
         content_el = soup.find('main') or soup.find('article') or soup.find('body') or soup
-        text = content_el.get_text(separator='\n', strip=True)
-        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = html_to_wikitext(str(content_el), source_url=url)
     elif 'pdf' in content_type:
         import pymupdf
         doc = pymupdf.open(stream=raw, filetype='pdf')
