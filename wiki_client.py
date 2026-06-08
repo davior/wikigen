@@ -134,18 +134,19 @@ class WikiClient:
             params['apcontinue'] = data['continue']['apcontinue']
         return titles
 
-    def get_pages_with_categories(self) -> dict[str, list[str]]:
-        """Return {title: [category_names]} for all main-namespace pages."""
+    def get_pages_with_categories(self) -> dict[str, dict]:
+        """Return {title: {'cats': [category_names], 'has_image': bool}} for all main-namespace pages."""
         self._ensure_connected()
-        result: dict[str, list[str]] = {}
+        result: dict[str, dict] = {}
         params = {
             'action': 'query',
             'generator': 'allpages',
             'gapnamespace': 0,
             'gaplimit': 50,
-            'prop': 'categories',
+            'prop': 'categories|images',
             'cllimit': 50,
             'clshow': '!hidden',
+            'imlimit': 1,
             'format': 'json',
         }
         while True:
@@ -160,10 +161,10 @@ class WikiClient:
             for page in data.get('query', {}).get('pages', {}).values():
                 title = page['title']
                 cats = [c['title'].replace('Category:', '') for c in page.get('categories', [])]
-                if title in result:
-                    result[title].extend(cats)
-                else:
-                    result[title] = cats
+                entry = result.setdefault(title, {'cats': [], 'has_image': False})
+                entry['cats'].extend(cats)
+                if page.get('images'):
+                    entry['has_image'] = True
             if 'continue' not in data:
                 break
             params.update(data['continue'])
