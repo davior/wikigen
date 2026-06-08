@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Callable
 
+from duckduckgo_search import DDGS
 from wiki_client import WikiClient
 
 
@@ -693,6 +694,7 @@ class WikiAgent:
             name = entry.get('section', '').strip()
             query = (entry.get('query') or name or step.title).strip()
             placement = placement_by_name.get(name, 'after_lead')
+            caption = (entry.get('caption') or name or step.title).strip()
             try:
                 results = self.wiki.search_commons_images(query, limit=5)
             except Exception:
@@ -701,12 +703,24 @@ class WikiAgent:
                 candidates.append({
                     'name': name,
                     'placement': placement,
-                    'caption': (entry.get('caption') or name or step.title).strip(),
+                    'caption': caption,
                     'results': results,
                 })
+            else:
+                web_images = self._search_web_images(query, limit=3)
+                for web_img in web_images:
+                    uploaded = self._download_and_upload_image(web_img['url'], name, caption)
+                    if uploaded:
+                        candidates.append({
+                            'name': name,
+                            'placement': placement,
+                            'caption': caption,
+                            'results': [uploaded],
+                        })
+                        break
 
         if not candidates:
-            raise ValueError(f'No images found on Commons for "{step.title}"')
+            raise ValueError(f'No images found for "{step.title}" (tried Commons and web search)')
 
         picks = self._pick_best_images(candidates)
 
@@ -733,7 +747,7 @@ class WikiAgent:
             })
 
         if not images:
-            raise ValueError(f'No images found on Commons for "{step.title}"')
+            raise ValueError(f'No images found for "{step.title}" (tried Commons and web search)')
 
         step.content = new_content
         step.old_content = content
@@ -803,6 +817,13 @@ class WikiAgent:
                 results = []
             if results:
                 candidates.append({'name': query, 'results': results})
+            else:
+                web_images = self._search_web_images(query, limit=3)
+                for web_img in web_images:
+                    uploaded = self._download_and_upload_image(web_img['url'], query, query)
+                    if uploaded:
+                        candidates.append({'name': query, 'results': [uploaded]})
+                        break
 
         picks = self._pick_best_images(candidates)
         chosen: dict[str, str] = {}
@@ -844,6 +865,35 @@ class WikiAgent:
             return [max(0, int(raw.get(str(i + 1), 1)) - 1) for i in range(len(candidates))]
         except Exception:
             return [0] * len(candidates)
+
+    def _search_web_images(self, query: str, limit: int = 3) -> list[dict]:
+        """Search DuckDuckGo for images. Returns list of {url, title, image}."""
+        try:
+            results = DDGS().images(query, max_results=limit)
+            return [{'url': r.get('image'), 'title': r.get('title', ''), 'source': r.get('source', '')} for r in results]
+        except Exception:
+            return []
+
+    def _download_and_upload_image(self, url: str, section_name: str, caption: str) -> Optional[dict]:
+        """Download image from URL and upload to wiki. Returns {filename, commons_url} or None on failure."""
+        try:
+            resp = requests.get(url, timeout=10, headers={'User-Agent': 'WikiGen/1.0'})
+            resp.raise_for_status()
+            mime_type = resp.headers.get('content-type', 'image/jpeg').split(';')[0]
+            if not mime_type.startswith('image/'):
+                return None
+
+            safe_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', section_name[:30])
+            filename = f"{safe_name}_{uuid.uuid4().hex[:8]}.jpg"
+            domain = re.sub(r'https?://(www\.)?', '', url.split('/')[2]) if url else 'web'
+            description = f"Web-sourced image for section '{section_name}'. Source: {url}"
+
+            result = self.wiki.upload_file(filename, resp.content, mime_type, description)
+            if result.get('upload', {}).get('result') == 'Success':
+                return {'filename': filename, 'commons_url': url, 'title': caption}
+        except Exception:
+            pass
+        return None
 
     def _execute_add_image_step(self, step: OperationStep) -> dict:
         if not step.content:
