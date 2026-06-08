@@ -459,33 +459,58 @@ class WikiClient:
 
     @staticmethod
     def search_wikipedia_images(topic: str, limit: int = 10) -> list[dict]:
-        """Fetch images from the English Wikipedia article for `topic`.
+        """Fetch images from the English Wikipedia article most relevant to `topic`.
+
+        Uses Wikipedia's search API to find the best-matching article title first,
+        so "Body Sensor Network" finds "Body area network", "Biological filaments"
+        finds "Microfilament", etc. — no exact title match required.
 
         Returns [{filename, thumb_url, commons_url}] — same shape as search_commons_images.
-        Images come from the actual Wikipedia article so they're curated and guaranteed relevant.
         """
         headers = {'User-Agent': 'WikiGen/3.0 (wiki management bot; https://github.com/davior/wikigen)'}
         wp_api = 'https://en.wikipedia.org/w/api.php'
         commons_api = 'https://commons.wikimedia.org/w/api.php'
 
-        r = requests.get(wp_api, params={
+        # Step 1: find the best-matching Wikipedia article title via search
+        rs = requests.get(wp_api, params={
             'action': 'query',
-            'titles': topic,
-            'prop': 'images',
-            'imlimit': 50,
-            'redirects': 1,
+            'list': 'search',
+            'srsearch': topic,
+            'srlimit': 3,
+            'srnamespace': 0,
             'format': 'json',
         }, headers=headers, timeout=10)
-        r.raise_for_status()
+        rs.raise_for_status()
+        search_hits = rs.json().get('query', {}).get('search', [])
 
-        pages = r.json().get('query', {}).get('pages', {})
-        page = next(iter(pages.values()), {})
-        image_titles = [
-            img['title'] for img in page.get('images', [])
-            if re.search(r'\.(jpe?g|png|svg|gif|webp)$', img['title'], re.IGNORECASE)
-            and not re.search(r'\b(icon|logo|flag|button|arrow|bullet|commons-logo)\b',
-                              img['title'], re.IGNORECASE)
-        ][:limit]
+        # Collect candidate titles: search results + the original topic (handles exact matches / redirects)
+        candidate_titles = [h['title'] for h in search_hits]
+        if topic not in candidate_titles:
+            candidate_titles.insert(0, topic)
+
+        # Step 2: try each candidate until we find one with images
+        image_titles: list[str] = []
+        for title in candidate_titles:
+            r = requests.get(wp_api, params={
+                'action': 'query',
+                'titles': title,
+                'prop': 'images',
+                'imlimit': 50,
+                'redirects': 1,
+                'format': 'json',
+            }, headers=headers, timeout=10)
+            r.raise_for_status()
+
+            pages = r.json().get('query', {}).get('pages', {})
+            page = next(iter(pages.values()), {})
+            image_titles = [
+                img['title'] for img in page.get('images', [])
+                if re.search(r'\.(jpe?g|png|svg|gif|webp)$', img['title'], re.IGNORECASE)
+                and not re.search(r'\b(icon|logo|flag|button|arrow|bullet|commons-logo)\b',
+                                  img['title'], re.IGNORECASE)
+            ][:limit]
+            if image_titles:
+                break
 
         if not image_titles:
             return []
