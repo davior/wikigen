@@ -457,6 +457,67 @@ class WikiClient:
             })
         return images
 
+    @staticmethod
+    def search_wikipedia_images(topic: str, limit: int = 10) -> list[dict]:
+        """Fetch images from the English Wikipedia article for `topic`.
+
+        Returns [{filename, thumb_url, commons_url}] — same shape as search_commons_images.
+        Images come from the actual Wikipedia article so they're curated and guaranteed relevant.
+        """
+        headers = {'User-Agent': 'WikiGen/3.0 (wiki management bot; https://github.com/davior/wikigen)'}
+        wp_api = 'https://en.wikipedia.org/w/api.php'
+        commons_api = 'https://commons.wikimedia.org/w/api.php'
+
+        r = requests.get(wp_api, params={
+            'action': 'query',
+            'titles': topic,
+            'prop': 'images',
+            'imlimit': 50,
+            'redirects': 1,
+            'format': 'json',
+        }, headers=headers, timeout=10)
+        r.raise_for_status()
+
+        pages = r.json().get('query', {}).get('pages', {})
+        page = next(iter(pages.values()), {})
+        image_titles = [
+            img['title'] for img in page.get('images', [])
+            if re.search(r'\.(jpe?g|png|svg|gif|webp)$', img['title'], re.IGNORECASE)
+            and not re.search(r'\b(icon|logo|flag|button|arrow|bullet|commons-logo)\b',
+                              img['title'], re.IGNORECASE)
+        ][:limit]
+
+        if not image_titles:
+            return []
+
+        r2 = requests.get(commons_api, params={
+            'action': 'query',
+            'titles': '|'.join(image_titles),
+            'prop': 'imageinfo',
+            'iiprop': 'url|mime',
+            'iiurlwidth': 300,
+            'format': 'json',
+        }, headers=headers, timeout=10)
+        r2.raise_for_status()
+
+        images = []
+        for p in r2.json().get('query', {}).get('pages', {}).values():
+            if 'imageinfo' not in p:
+                continue
+            info = p['imageinfo'][0]
+            if not info.get('mime', '').startswith('image/'):
+                continue
+            filename = p['title'][5:]  # strip "File:"
+            images.append({
+                'filename': filename,
+                'thumb_url': info.get('thumburl', ''),
+                'commons_url': (
+                    f"https://commons.wikimedia.org/wiki/File:"
+                    f"{requests.utils.quote(filename, safe='')}"
+                ),
+            })
+        return images
+
 
 def _strip_html(text: str) -> str:
     return re.sub(r'<[^>]+>', '', text)

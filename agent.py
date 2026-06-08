@@ -226,6 +226,14 @@ _IMAGE_PLACEHOLDER_RE = re.compile(r'\{\{COMMONS_IMAGE:([^|}]*?)(?:\|([^}]*))?\}
 MAX_PLACEHOLDER_IMAGES = 3
 
 
+def _try_commons(client: 'WikiClient', query: str) -> list[dict]:
+    """Search Commons for `query`; returns results list or [] on failure/empty."""
+    try:
+        return client.search_commons_images(query, limit=5) or []
+    except Exception:
+        return []
+
+
 
 
 def _insert_image(content: str, filename: str, caption: str, placement: str) -> str:
@@ -667,13 +675,27 @@ class WikiAgent:
         candidates = []  # [{name, placement, caption, results}]
         for entry in chosen_sections:
             name = entry.get('section', '').strip()
-            query = (entry.get('query') or name or step.title).strip()
+            haiku_query = (entry.get('query') or '').strip()
             placement = placement_by_name.get(name, 'after_lead')
             caption = (entry.get('caption') or name or step.title).strip()
-            try:
-                results = self.wiki.search_commons_images(query, limit=5)
-            except Exception:
-                results = []
+
+            # Tier 1: title + section name (predictable, always relevant)
+            title_section = f'{step.title} {name}'.strip() if name else step.title
+            results = _try_commons(self.wiki, title_section)
+            # Tier 2: page title alone (broad but always on-topic)
+            if not results:
+                results = _try_commons(self.wiki, step.title)
+            # Tier 3: Haiku-generated query (may be more descriptive)
+            if not results and haiku_query and haiku_query.lower() not in (
+                    title_section.lower(), step.title.lower()):
+                results = _try_commons(self.wiki, haiku_query)
+            # Tier 4: Wikipedia article images for this topic
+            if not results:
+                try:
+                    results = WikiClient.search_wikipedia_images(step.title, limit=5)
+                except Exception:
+                    results = []
+
             if results:
                 candidates.append({
                     'name': name,
@@ -682,7 +704,9 @@ class WikiAgent:
                     'results': results,
                 })
             else:
-                web_images = self._search_web_images(query, limit=3)
+                # Tier 5: DuckDuckGo web search + upload (last resort)
+                web_query = haiku_query or title_section
+                web_images = self._search_web_images(web_query, limit=3)
                 for web_img in web_images:
                     uploaded = self._download_and_upload_image(web_img['url'], name, caption)
                     if uploaded:
@@ -742,7 +766,10 @@ class WikiAgent:
             f'These are the sections that do NOT yet have an image:\n\n{section_blocks}{context_hint}\n\n'
             'Choose 2 to 3 of these sections that would benefit from an illustrative image. '
             'Prioritize breadth and coverage. For each chosen section provide a concise '
-            'Wikimedia Commons search query and a short caption.\n\n'
+            'Wikimedia Commons search query — ALWAYS include the article title '
+            f'"{step.title}" in the query (e.g. for article "Carbon Nanotubes" '
+            'section "Structure", query should be "carbon nanotubes structure", '
+            'not just "structure"). Also provide a short caption.\n\n'
             'Return ONLY JSON: '
             '{"images": [{"section": "<exact section name>", '
             '"query": "commons search terms", "caption": "caption text"}]}'
@@ -786,10 +813,14 @@ class WikiAgent:
         # Search Commons per kept query, then pick the best filename per query via Haiku.
         candidates = []  # [{name: query, results}]
         for query in kept_queries:
-            try:
-                results = self.wiki.search_commons_images(query, limit=5)
-            except Exception:
-                results = []
+            # Tier 1: Commons with placeholder query
+            results = _try_commons(self.wiki, query)
+            # Tier 2: Wikipedia article images using the query as topic
+            if not results:
+                try:
+                    results = WikiClient.search_wikipedia_images(query, limit=5)
+                except Exception:
+                    results = []
             if results:
                 candidates.append({'name': query, 'results': results})
             else:
