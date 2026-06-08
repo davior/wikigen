@@ -1,5 +1,6 @@
 import concurrent.futures
 import json
+import os
 import queue
 import re
 import requests
@@ -13,7 +14,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Callable
 
-from duckduckgo_search import DDGS
 from wiki_client import WikiClient
 
 
@@ -226,12 +226,6 @@ _IMAGE_PLACEHOLDER_RE = re.compile(r'\{\{COMMONS_IMAGE:([^|}]*?)(?:\|([^}]*))?\}
 MAX_PLACEHOLDER_IMAGES = 3
 
 
-def _try_commons(client: 'WikiClient', query: str) -> list[dict]:
-    """Search Commons for `query`; returns results list or [] on failure/empty."""
-    try:
-        return client.search_commons_images(query, limit=5) or []
-    except Exception:
-        return []
 
 
 
@@ -670,56 +664,40 @@ class WikiAgent:
         if not chosen_sections:
             raise ValueError(f'No suitable section found for an image on "{step.title}"')
 
-        # Search Commons per chosen section, then pick the best filename per section.
+        # Find and upload images for each chosen section.
         placement_by_name = {s['name']: s['placement'] for s in sections}
         candidates = []  # [{name, placement, caption, results}]
-        for entry in chosen_sections:
+        for i, entry in enumerate(chosen_sections):
             name = entry.get('section', '').strip()
-            haiku_query = (entry.get('query') or '').strip()
-            placement = placement_by_name.get(name, 'after_lead')
             caption = (entry.get('caption') or name or step.title).strip()
+            placement = placement_by_name.get(name, 'after_lead')
 
-            # Tier 1: title + section name (predictable, always relevant)
-            title_section = f'{step.title} {name}'.strip() if name else step.title
-            results = _try_commons(self.wiki, title_section)
-            # Tier 2: page title alone (broad but always on-topic)
-            if not results:
-                results = _try_commons(self.wiki, step.title)
-            # Tier 3: Haiku-generated query (may be more descriptive)
-            if not results and haiku_query and haiku_query.lower() not in (
-                    title_section.lower(), step.title.lower()):
-                results = _try_commons(self.wiki, haiku_query)
-            # Tier 4: Wikipedia article images for this topic
-            if not results:
-                try:
-                    results = WikiClient.search_wikipedia_images(step.title, limit=5)
-                except Exception:
-                    results = []
+            # First image: title only for broad relevance.
+            # Remaining images: title + section name for specificity.
+            query = step.title if i == 0 else f'{step.title} {name}'
 
-            if results:
-                candidates.append({
-                    'name': name,
-                    'placement': placement,
-                    'caption': caption,
-                    'results': results,
-                })
-            else:
-                # Tier 5: DuckDuckGo web search + upload (last resort)
-                web_query = haiku_query or title_section
-                web_images = self._search_web_images(web_query, limit=3)
-                for web_img in web_images:
-                    uploaded = self._download_and_upload_image(web_img['url'], name, caption)
-                    if uploaded:
-                        candidates.append({
-                            'name': name,
-                            'placement': placement,
-                            'caption': caption,
-                            'results': [uploaded],
-                        })
-                        break
+            # Primary: Google Image Search → download → upload
+            google_results = self._search_google_images(query, limit=3)
+            if google_results:
+                img = google_results[0]
+                uploaded = self._download_and_upload_image(
+                    img['url'], name, caption, img.get('source_page_url', ''))
+                if uploaded:
+                    candidates.append({'name': name, 'placement': placement,
+                                       'caption': caption, 'results': [uploaded]})
+                    continue
+
+            # Fallback: Wikipedia article images (on Commons, no key needed)
+            try:
+                wp_results = WikiClient.search_wikipedia_images(step.title, limit=5)
+            except Exception:
+                wp_results = []
+            if wp_results:
+                candidates.append({'name': name, 'placement': placement,
+                                   'caption': caption, 'results': wp_results})
 
         if not candidates:
-            raise ValueError(f'No images found for "{step.title}" (tried Commons and web search)')
+            raise ValueError(f'No images found for "{step.title}" (tried Google and Wikipedia)')
 
         picks = self._pick_best_images(candidates)
 
@@ -746,7 +724,7 @@ class WikiAgent:
             })
 
         if not images:
-            raise ValueError(f'No images found for "{step.title}" (tried Commons and web search)')
+            raise ValueError(f'No images found for "{step.title}" (tried Google and Wikipedia)')
 
         step.content = new_content
         step.old_content = content
@@ -765,14 +743,10 @@ class WikiAgent:
             f'You are choosing where to add images to the wiki page "{step.title}".\n\n'
             f'These are the sections that do NOT yet have an image:\n\n{section_blocks}{context_hint}\n\n'
             'Choose 2 to 3 of these sections that would benefit from an illustrative image. '
-            'Prioritize breadth and coverage. For each chosen section provide a concise '
-            'Wikimedia Commons search query — ALWAYS include the article title '
-            f'"{step.title}" in the query (e.g. for article "Carbon Nanotubes" '
-            'section "Structure", query should be "carbon nanotubes structure", '
-            'not just "structure"). Also provide a short caption.\n\n'
+            'Prioritize breadth and coverage. For each chosen section provide a short, '
+            'descriptive caption for the image.\n\n'
             'Return ONLY JSON: '
-            '{"images": [{"section": "<exact section name>", '
-            '"query": "commons search terms", "caption": "caption text"}]}'
+            '{"images": [{"section": "<exact section name>", "caption": "caption text"}]}'
         )
         try:
             data = _extract_json(self._call_ai(prompt, model='claude-haiku-4-5-20251001'))
@@ -782,14 +756,7 @@ class WikiAgent:
             return picks[:3]
         except Exception:
             # Fall back to picking 2-3 sections by position when Haiku fails.
-            fallback = []
-            for i, section in enumerate(sections[:3]):
-                fallback.append({
-                    'section': section['name'],
-                    'query': section['name'],
-                    'caption': section['name'],
-                })
-            return fallback
+            return [{'section': s['name'], 'caption': s['name']} for s in sections[:3]]
 
     def _resolve_image_placeholders(self, content: str) -> str:
         """Replace {{COMMONS_IMAGE:query|caption}} placeholders with real Commons file refs.
@@ -810,26 +777,25 @@ class WikiAgent:
                 kept_queries.append(query)
         kept_queries = kept_queries[:MAX_PLACEHOLDER_IMAGES]
 
-        # Search Commons per kept query, then pick the best filename per query via Haiku.
+        # Find and upload an image for each placeholder query.
         candidates = []  # [{name: query, results}]
         for query in kept_queries:
-            # Tier 1: Commons with placeholder query
-            results = _try_commons(self.wiki, query)
-            # Tier 2: Wikipedia article images using the query as topic
-            if not results:
-                try:
-                    results = WikiClient.search_wikipedia_images(query, limit=5)
-                except Exception:
-                    results = []
-            if results:
-                candidates.append({'name': query, 'results': results})
-            else:
-                web_images = self._search_web_images(query, limit=3)
-                for web_img in web_images:
-                    uploaded = self._download_and_upload_image(web_img['url'], query, query)
-                    if uploaded:
-                        candidates.append({'name': query, 'results': [uploaded]})
-                        break
+            # Primary: Google Image Search → download → upload
+            google_results = self._search_google_images(query, limit=3)
+            if google_results:
+                img = google_results[0]
+                uploaded = self._download_and_upload_image(
+                    img['url'], query, query, img.get('source_page_url', ''))
+                if uploaded:
+                    candidates.append({'name': query, 'results': [uploaded]})
+                    continue
+            # Fallback: Wikipedia article images
+            try:
+                wp_results = WikiClient.search_wikipedia_images(query, limit=5)
+            except Exception:
+                wp_results = []
+            if wp_results:
+                candidates.append({'name': query, 'results': wp_results})
 
         picks = self._pick_best_images(candidates)
         chosen: dict[str, str] = {}
@@ -872,27 +838,35 @@ class WikiAgent:
         except Exception:
             return [0] * len(candidates)
 
-    def _search_web_images(self, query: str, limit: int = 3) -> list[dict]:
-        """Search DuckDuckGo for images with fallback to alternative queries.
+    def _search_google_images(self, query: str, limit: int = 5) -> list[dict]:
+        """Search Google Custom Search API for images.
 
-        Tries original query first, then falls back to alternative queries if no results.
-        Returns list of {url, title, image} or empty list if all queries fail.
+        Returns [{url, source_page_url, title}] or [] if unconfigured or on failure.
+        Requires GOOGLE_API_KEY and GOOGLE_CSE_ID environment variables.
         """
-        queries = [query]
-        queries.extend(self._generate_image_search_queries(query))
-
-        for q in queries:
-            try:
-                results = DDGS().images(q, max_results=limit)
-                valid_results = [
-                    {'url': r.get('image'), 'title': r.get('title', ''), 'source': r.get('source', '')}
-                    for r in results if r.get('image')
-                ]
-                if valid_results:
-                    return valid_results
-            except Exception:
-                continue
-        return []
+        api_key = os.environ.get('GOOGLE_API_KEY', '')
+        cse_id = os.environ.get('GOOGLE_CSE_ID', '')
+        if not api_key or not cse_id:
+            return []
+        try:
+            r = requests.get('https://www.googleapis.com/customsearch/v1', params={
+                'key': api_key,
+                'cx': cse_id,
+                'searchType': 'image',
+                'q': query,
+                'num': min(limit, 10),
+            }, timeout=10)
+            r.raise_for_status()
+            return [
+                {
+                    'url': item['link'],
+                    'source_page_url': item.get('image', {}).get('contextLink', ''),
+                    'title': item.get('title', ''),
+                }
+                for item in r.json().get('items', []) if item.get('link')
+            ]
+        except Exception:
+            return []
 
     def _fix_broken_image_refs(self, content: str) -> str:
         """Repair broken [[File:...]] references that don't exist locally or on Commons.
@@ -927,9 +901,10 @@ class WikiAgent:
                 pass
 
             if not replacement:
-                web_images = self._search_web_images(query, limit=2)
-                for web_img in web_images:
-                    uploaded = self._download_and_upload_image(web_img['url'], query, query)
+                google_results = self._search_google_images(query, limit=2)
+                for g_img in google_results:
+                    uploaded = self._download_and_upload_image(
+                        g_img['url'], query, query, g_img.get('source_page_url', ''))
                     if uploaded:
                         replacement = uploaded['filename']
                         break
@@ -947,27 +922,8 @@ class WikiAgent:
 
         return _FILE_REF_RE.sub(apply_replacement, content)
 
-    def _generate_image_search_queries(self, term: str) -> list[str]:
-        """Generate alternative search queries for a given term using Haiku.
-
-        Returns list of 2-3 alternative search terms to try if the original fails.
-        """
-        prompt = (
-            f'Generate 2-3 alternative search terms for finding images related to: "{term}"\n\n'
-            f'If this is a technical/specific term, suggest simpler or broader alternatives.\n'
-            f'If it contains multiple concepts, suggest singular forms or related concepts.\n'
-            f'Return ONLY a JSON array of strings, e.g.: ["term1", "term2", "term3"]\n'
-            f'Keep terms concise (1-3 words each).'
-        )
-        try:
-            data = _extract_json(self._call_ai(prompt, model='claude-haiku-4-5-20251001'))
-            if isinstance(data, list):
-                return [str(q).strip() for q in data if q][:3]
-        except Exception:
-            pass
-        return []
-
-    def _download_and_upload_image(self, url: str, section_name: str, caption: str) -> Optional[dict]:
+    def _download_and_upload_image(self, url: str, section_name: str, caption: str,
+                                   source_page_url: str = '') -> Optional[dict]:
         """Download image from URL and upload to wiki. Returns {filename, commons_url} or None on failure."""
         try:
             resp = requests.get(url, timeout=10, headers={'User-Agent': 'WikiGen/1.0'})
@@ -976,10 +932,14 @@ class WikiAgent:
             if not mime_type.startswith('image/'):
                 return None
 
-            safe_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', section_name[:30])
-            filename = f"{safe_name}_{uuid.uuid4().hex[:8]}.jpg"
-            domain = re.sub(r'https?://(www\.)?', '', url.split('/')[2]) if url else 'web'
-            description = f"Web-sourced image for section '{section_name}'. Source: {url}"
+            ext_match = re.search(r'\.(jpe?g|png|gif|webp|svg)(?:[?#]|$)', url, re.IGNORECASE)
+            ext = ext_match.group(1).lower() if ext_match else 'jpg'
+            if ext == 'jpeg':
+                ext = 'jpg'
+            safe_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', (caption or section_name)[:40])
+            filename = f"{safe_name}_{uuid.uuid4().hex[:8]}.{ext}"
+            source_attr = source_page_url or url
+            description = f"{caption or section_name}.\nSource: {source_attr}"
 
             result = self.wiki.upload_file(filename, resp.content, mime_type, description)
             if result.get('success'):
