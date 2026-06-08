@@ -35,6 +35,8 @@ If the user requests creation of a page that already exists in the SITE INDEX:
 - Suggest an 'edit' step instead if the user wants to modify the existing page
 - In your description, note which requested pages already exist so the user understands why they were not included
 
+Pages marked [img] in the SITE INDEX already have at least one embedded image. Pages without [img] have no embedded images. Use this to filter correctly when the user asks to find pages with or without images.
+
 Step types you may produce:
 - create: Create a new page from scratch (ONLY for titles NOT in the SITE INDEX)
 - edit: Modify an existing page (must exist in the index)
@@ -193,16 +195,17 @@ def _format_site_index(pages: dict) -> str:
     if not pages:
         return 'SITE INDEX: (empty wiki — no pages yet)'
 
-    def _cats_desc(value) -> tuple[list[str], str]:
+    def _cats_desc(value) -> tuple[list[str], str, bool]:
         if isinstance(value, dict):
-            return (value.get('c') or []), (value.get('d') or '').strip()
-        return (value or []), ''
+            return (value.get('c') or []), (value.get('d') or '').strip(), bool(value.get('i'))
+        return (value or []), '', False
 
     by_cat: dict[str, list[str]] = {}
     uncategorized: list[str] = []
     for title, value in pages.items():
-        cats, desc = _cats_desc(value)
-        label = f'{title} — {desc}' if desc else title
+        cats, desc, has_image = _cats_desc(value)
+        img_marker = ' [img]' if has_image else ''
+        label = f'{title} — {desc}{img_marker}' if desc else f'{title}{img_marker}'
         if cats:
             for cat in cats:
                 by_cat.setdefault(cat, []).append(label)
@@ -210,7 +213,7 @@ def _format_site_index(pages: dict) -> str:
             uncategorized.append(label)
 
     lines = [f'SITE INDEX: {len(pages)} pages '
-             '(grouped by category; "title — description" where known)']
+             '(grouped by category; "title — description" where known; [img] = page has images)']
     for cat in sorted(by_cat):
         lines.append(f'{cat}: {" · ".join(sorted(by_cat[cat]))}')
     if uncategorized:

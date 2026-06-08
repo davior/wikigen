@@ -40,7 +40,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _cache: dict[str, dict] = {}
 _locks: dict[str, threading.Lock] = {}
@@ -48,6 +48,7 @@ _locks_guard = threading.Lock()
 _storage_dir: Path | None = None
 
 _CAT_RE = re.compile(r'\[\[Category:([^|\]]+)', re.IGNORECASE)
+_IMG_RE = re.compile(r'\[\[(?:File|Image):', re.IGNORECASE)
 
 
 def set_storage_dir(path) -> None:
@@ -104,8 +105,11 @@ def _full_rebuild(client) -> dict:
     # lands mid-rebuild shows up as "stale" on the next status check rather than
     # being silently assumed present.
     head = _safe_rc_head(client) or 0
-    raw = client.get_pages_with_categories()  # {title: [categories]}
-    pages = {title: {'c': cats, 'd': '', 't': ''} for title, cats in raw.items()}
+    raw = client.get_pages_with_categories()  # {title: {'cats': [...], 'has_image': bool}}
+    pages = {
+        title: {'c': info['cats'], 'd': '', 't': '', 'i': info['has_image']}
+        for title, info in raw.items()
+    }
     return {
         'pages': pages,
         'pending': {},
@@ -283,11 +287,14 @@ def record_session_changes(connection_id: str, changes: dict) -> None:
             title = item.get('title')
             if not title:
                 continue
-            desc, cats = _summarize(item.get('content') or '')
+            content = item.get('content') or ''
+            desc, cats = _summarize(content)
+            has_image = bool(_IMG_RE.search(content)) if content else False
             prev = pending.get(title) or {}
             pending[title] = {
                 'c': cats or prev.get('c', []),
                 'd': desc or prev.get('d', ''),
+                'i': has_image if content else prev.get('i', False),
             }
 
         _write_sidecar(connection_id, entry)
