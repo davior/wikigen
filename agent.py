@@ -867,12 +867,46 @@ class WikiAgent:
             return [0] * len(candidates)
 
     def _search_web_images(self, query: str, limit: int = 3) -> list[dict]:
-        """Search DuckDuckGo for images. Returns list of {url, title, image}."""
+        """Search DuckDuckGo for images with fallback to alternative queries.
+
+        Tries original query first, then falls back to alternative queries if no results.
+        Returns list of {url, title, image} or empty list if all queries fail.
+        """
+        queries = [query]
+        queries.extend(self._generate_image_search_queries(query))
+
+        for q in queries:
+            try:
+                results = DDGS().images(q, max_results=limit)
+                valid_results = [
+                    {'url': r.get('image'), 'title': r.get('title', ''), 'source': r.get('source', '')}
+                    for r in results if r.get('image')
+                ]
+                if valid_results:
+                    return valid_results
+            except Exception:
+                continue
+        return []
+
+    def _generate_image_search_queries(self, term: str) -> list[str]:
+        """Generate alternative search queries for a given term using Haiku.
+
+        Returns list of 2-3 alternative search terms to try if the original fails.
+        """
+        prompt = (
+            f'Generate 2-3 alternative search terms for finding images related to: "{term}"\n\n'
+            f'If this is a technical/specific term, suggest simpler or broader alternatives.\n'
+            f'If it contains multiple concepts, suggest singular forms or related concepts.\n'
+            f'Return ONLY a JSON array of strings, e.g.: ["term1", "term2", "term3"]\n'
+            f'Keep terms concise (1-3 words each).'
+        )
         try:
-            results = DDGS().images(query, max_results=limit)
-            return [{'url': r.get('image'), 'title': r.get('title', ''), 'source': r.get('source', '')} for r in results]
+            data = _extract_json(self._call_ai(prompt, model='claude-haiku-4-5-20251001'))
+            if isinstance(data, list):
+                return [str(q).strip() for q in data if q][:3]
         except Exception:
-            return []
+            pass
+        return []
 
     def _download_and_upload_image(self, url: str, section_name: str, caption: str) -> Optional[dict]:
         """Download image from URL and upload to wiki. Returns {filename, commons_url} or None on failure."""
