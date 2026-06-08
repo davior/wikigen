@@ -223,37 +223,6 @@ _IMAGE_PLACEHOLDER_RE = re.compile(r'\{\{COMMONS_IMAGE:([^|}]*?)(?:\|([^}]*))?\}
 MAX_PLACEHOLDER_IMAGES = 3
 
 
-def _fix_file_references(content: str, wiki) -> str:
-    matches = list(_FILE_REF_RE.finditer(content))
-    if not matches:
-        return content
-    filenames = [m.group(1).strip() for m in matches]
-    try:
-        existing = wiki.check_commons_files_exist(filenames)
-    except Exception:
-        return content
-    replacements = {}
-    for m in matches:
-        filename = m.group(1).strip()
-        if filename in existing or filename in replacements:
-            continue
-        query = re.sub(r'\.[^.]+$', '', filename).replace('_', ' ').replace('-', ' ')
-        try:
-            results = wiki.search_commons_images(query, limit=3)
-        except Exception:
-            results = []
-        replacements[filename] = results[0]['filename'] if results else None
-
-    def apply_replacement(m):
-        filename = m.group(1).strip()
-        options = m.group(2) or ''
-        closing = m.group(3)
-        if filename in existing:
-            return m.group(0)
-        sub = replacements.get(filename)
-        return f'[[File:{sub}{options}{closing}' if sub else ''
-
-    return _FILE_REF_RE.sub(apply_replacement, content)
 
 
 def _insert_image(content: str, filename: str, caption: str, placement: str) -> str:
@@ -571,7 +540,7 @@ class WikiAgent:
         )
         content = self._call_ai(prompt)
         content = self._resolve_image_placeholders(content)
-        content = _fix_file_references(content, self.wiki)
+        content = self._fix_broken_image_refs(content)
         return {
             'content': content,
             'summary': f'Create: {title}',
@@ -589,7 +558,7 @@ class WikiAgent:
         )
         new_content = self._call_ai(prompt)
         new_content = self._resolve_image_placeholders(new_content)
-        return _fix_file_references(new_content, self.wiki)
+        return self._fix_broken_image_refs(new_content)
 
     def _execute_find_replace_step(self, step: OperationStep) -> dict:
         # Extract pairs from step description via AI
@@ -677,6 +646,9 @@ class WikiAgent:
         if not page.get('exists') or not page.get('content'):
             raise ValueError(f'Page "{step.title}" not found or empty')
         content = page['content']
+
+        # Repair broken image references before analyzing sections.
+        content = self._fix_broken_image_refs(content)
 
         # Candidate sections = those that don't already have an image.
         sections = [s for s in _split_sections(content) if not s['has_image']]
@@ -887,6 +859,59 @@ class WikiAgent:
             except Exception:
                 continue
         return []
+
+    def _fix_broken_image_refs(self, content: str) -> str:
+        """Repair broken [[File:...]] references that don't exist locally or on Commons.
+
+        For each missing file: tries Commons search, then web search + upload fallback.
+        Preserves file options and removes refs if no replacement found.
+        """
+        matches = list(_FILE_REF_RE.finditer(content))
+        if not matches:
+            return content
+        filenames = [m.group(1).strip() for m in matches]
+        try:
+            local_ok = self.wiki.check_local_files_exist(filenames)
+            commons_ok = WikiClient.check_commons_files_exist(filenames)
+            existing = local_ok | commons_ok
+        except Exception:
+            return content
+
+        replacements = {}
+        for m in matches:
+            filename = m.group(1).strip()
+            if filename in existing or filename in replacements:
+                continue
+            query = re.sub(r'\.[^.]+$', '', filename).replace('_', ' ').replace('-', ' ')
+            replacement = None
+
+            try:
+                results = self.wiki.search_commons_images(query, limit=3)
+                if results:
+                    replacement = results[0]['filename']
+            except Exception:
+                pass
+
+            if not replacement:
+                web_images = self._search_web_images(query, limit=2)
+                for web_img in web_images:
+                    uploaded = self._download_and_upload_image(web_img['url'], query, query)
+                    if uploaded:
+                        replacement = uploaded['filename']
+                        break
+
+            replacements[filename] = replacement
+
+        def apply_replacement(m):
+            filename = m.group(1).strip()
+            options = m.group(2) or ''
+            closing = m.group(3)
+            if filename in existing:
+                return m.group(0)
+            sub = replacements.get(filename)
+            return f'[[File:{sub}{options}{closing}' if sub else ''
+
+        return _FILE_REF_RE.sub(apply_replacement, content)
 
     def _generate_image_search_queries(self, term: str) -> list[str]:
         """Generate alternative search queries for a given term using Haiku.
