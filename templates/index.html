@@ -2094,6 +2094,7 @@ function showToast(msg, type = 'info') {
 
   if (type === 'error') {
     el.querySelector('.toast-close').addEventListener('click', dismiss);
+    setTimeout(dismiss, 7000);
   } else {
     setTimeout(dismiss, 7000);
   }

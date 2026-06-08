@@ -923,7 +923,7 @@ class WikiAgent:
             description = f"Web-sourced image for section '{section_name}'. Source: {url}"
 
             result = self.wiki.upload_file(filename, resp.content, mime_type, description)
-            if result.get('upload', {}).get('result') == 'Success':
+            if result.get('success'):
                 return {'filename': filename, 'commons_url': url, 'title': caption}
         except Exception:
             pass
