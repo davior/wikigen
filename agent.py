@@ -226,6 +226,24 @@ _IMAGE_PLACEHOLDER_RE = re.compile(r'\{\{COMMONS_IMAGE:([^|}]*?)(?:\|([^}]*))?\}
 MAX_PLACEHOLDER_IMAGES = 3
 
 
+def _shorten_queries(query: str) -> list[str]:
+    """Return a list of progressively shorter variants of a search query.
+
+    Google Custom Search indexes less than google.com; dropping trailing words
+    often finds results when the exact phrase has no indexed images.
+    e.g. "DARPA N3 Programme" → ["DARPA N3 Programme", "DARPA N3", "DARPA"]
+    Always includes at least the original query.
+    """
+    words = query.split()
+    queries = [query]
+    while len(words) > 1:
+        words = words[:-1]
+        shorter = ' '.join(words)
+        if shorter not in queries:
+            queries.append(shorter)
+    return queries
+
+
 
 
 
@@ -676,8 +694,14 @@ class WikiAgent:
             # Remaining images: title + section name for specificity.
             query = step.title if i == 0 else f'{step.title} {name}'
 
-            # Primary: Google Image Search → download → upload
-            google_results = self._search_google_images(query, limit=3)
+            # Primary: Google Image Search → download → upload.
+            # Google Custom Search indexes less than google.com, so retry with a
+            # progressively shorter query before giving up.
+            google_results = []
+            for attempt_query in _shorten_queries(query):
+                google_results = self._search_google_images(attempt_query, limit=3)
+                if google_results:
+                    break
             if google_results:
                 img = google_results[0]
                 uploaded = self._download_and_upload_image(
@@ -780,8 +804,12 @@ class WikiAgent:
         # Find and upload an image for each placeholder query.
         candidates = []  # [{name: query, results}]
         for query in kept_queries:
-            # Primary: Google Image Search → download → upload
-            google_results = self._search_google_images(query, limit=3)
+            # Primary: Google Image Search → download → upload (with query shortening retry)
+            google_results = []
+            for attempt_query in _shorten_queries(query):
+                google_results = self._search_google_images(attempt_query, limit=3)
+                if google_results:
+                    break
             if google_results:
                 img = google_results[0]
                 uploaded = self._download_and_upload_image(
@@ -841,7 +869,9 @@ class WikiAgent:
     def _search_google_images(self, query: str, limit: int = 5) -> list[dict]:
         """Search Google Custom Search API for images.
 
-        Returns [{url, source_page_url, title}] or [] if unconfigured or on failure.
+        Returns [{url, source_page_url, title}] or [] if unconfigured or on no results.
+        Raises ValueError with the API error message on authentication/quota failures so
+        the caller can surface the problem rather than silently skipping images.
         Requires GOOGLE_API_KEY and GOOGLE_CSE_ID environment variables.
         """
         api_key = os.environ.get('GOOGLE_API_KEY', '')
@@ -856,7 +886,9 @@ class WikiAgent:
                 'q': query,
                 'num': min(limit, 10),
             }, timeout=10)
-            r.raise_for_status()
+            if not r.ok:
+                err = r.json().get('error', {}).get('message', r.text[:200])
+                raise ValueError(f'Google API error {r.status_code}: {err}')
             return [
                 {
                     'url': item['link'],
@@ -865,6 +897,8 @@ class WikiAgent:
                 }
                 for item in r.json().get('items', []) if item.get('link')
             ]
+        except ValueError:
+            raise
         except Exception:
             return []
 
