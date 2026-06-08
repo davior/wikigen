@@ -229,7 +229,7 @@ MAX_PLACEHOLDER_IMAGES = 3
 def _shorten_queries(query: str) -> list[str]:
     """Return a list of progressively shorter variants of a search query.
 
-    Google Custom Search indexes less than google.com; dropping trailing words
+    Bing Image Search indexes less content than bing.com; dropping trailing words
     often finds results when the exact phrase has no indexed images.
     e.g. "DARPA N3 Programme" → ["DARPA N3 Programme", "DARPA N3", "DARPA"]
     Always includes at least the original query.
@@ -694,22 +694,21 @@ class WikiAgent:
             # Remaining images: title + section name for specificity.
             query = step.title if i == 0 else f'{step.title} {name}'
 
-            # Primary: Google Image Search → download → upload.
-            # Google Custom Search indexes less than google.com, so retry with
-            # progressively shorter queries. API errors (quota, billing, etc.)
+            # Primary: Bing Image Search → download → upload.
+            # Retry with progressively shorter queries; API errors (quota, key)
             # are caught here so Wikipedia always gets a chance as fallback.
-            google_results = []
-            google_error = ''
+            bing_results = []
+            bing_error = ''
             for attempt_query in _shorten_queries(query):
                 try:
-                    google_results = self._search_bing_images(attempt_query, limit=3)
+                    bing_results = self._search_bing_images(attempt_query, limit=3)
                 except ValueError as exc:
-                    google_error = str(exc)
+                    bing_error = str(exc)
                     break  # API error won't change per query — stop retrying
-                if google_results:
+                if bing_results:
                     break
-            if google_results:
-                img = google_results[0]
+            if bing_results:
+                img = bing_results[0]
                 uploaded = self._download_and_upload_image(
                     img['url'], name, caption, img.get('source_page_url', ''))
                 if uploaded:
@@ -725,12 +724,11 @@ class WikiAgent:
             if wp_results:
                 candidates.append({'name': name, 'placement': placement,
                                    'caption': caption, 'results': wp_results})
-            elif google_error:
-                # Surface the Google error only if Wikipedia also found nothing
-                raise ValueError(google_error)
+            elif bing_error:
+                raise ValueError(bing_error)
 
         if not candidates:
-            raise ValueError(f'No images found for "{step.title}" (tried Google and Wikipedia)')
+            raise ValueError(f'No images found for "{step.title}" (tried Bing and Wikipedia)')
 
         picks = self._pick_best_images(candidates)
 
@@ -757,7 +755,7 @@ class WikiAgent:
             })
 
         if not images:
-            raise ValueError(f'No images found for "{step.title}" (tried Google and Wikipedia)')
+            raise ValueError(f'No images found for "{step.title}" (tried Bing and Wikipedia)')
 
         step.content = new_content
         step.old_content = content
@@ -813,17 +811,17 @@ class WikiAgent:
         # Find and upload an image for each placeholder query.
         candidates = []  # [{name: query, results}]
         for query in kept_queries:
-            # Primary: Google Image Search → download → upload (with query shortening retry)
-            google_results = []
+            # Primary: Bing Image Search → download → upload (with query shortening retry)
+            bing_results = []
             for attempt_query in _shorten_queries(query):
                 try:
-                    google_results = self._search_bing_images(attempt_query, limit=3)
+                    bing_results = self._search_bing_images(attempt_query, limit=3)
                 except ValueError:
                     break  # API error — skip to Wikipedia fallback
-                if google_results:
+                if bing_results:
                     break
-            if google_results:
-                img = google_results[0]
+            if bing_results:
+                img = bing_results[0]
                 uploaded = self._download_and_upload_image(
                     img['url'], query, query, img.get('source_page_url', ''))
                 if uploaded:
@@ -943,8 +941,8 @@ class WikiAgent:
                 pass
 
             if not replacement:
-                google_results = self._search_bing_images(query, limit=2)
-                for g_img in google_results:
+                bing_results = self._search_bing_images(query, limit=2)
+                for g_img in bing_results:
                     uploaded = self._download_and_upload_image(
                         g_img['url'], query, query, g_img.get('source_page_url', ''))
                     if uploaded:
