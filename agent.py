@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Callable
 
+from duckduckgo_search import DDGS
 from wiki_client import WikiClient
 
 
@@ -222,37 +223,6 @@ _IMAGE_PLACEHOLDER_RE = re.compile(r'\{\{COMMONS_IMAGE:([^|}]*?)(?:\|([^}]*))?\}
 MAX_PLACEHOLDER_IMAGES = 3
 
 
-def _fix_file_references(content: str, wiki) -> str:
-    matches = list(_FILE_REF_RE.finditer(content))
-    if not matches:
-        return content
-    filenames = [m.group(1).strip() for m in matches]
-    try:
-        existing = wiki.check_commons_files_exist(filenames)
-    except Exception:
-        return content
-    replacements = {}
-    for m in matches:
-        filename = m.group(1).strip()
-        if filename in existing or filename in replacements:
-            continue
-        query = re.sub(r'\.[^.]+$', '', filename).replace('_', ' ').replace('-', ' ')
-        try:
-            results = wiki.search_commons_images(query, limit=3)
-        except Exception:
-            results = []
-        replacements[filename] = results[0]['filename'] if results else None
-
-    def apply_replacement(m):
-        filename = m.group(1).strip()
-        options = m.group(2) or ''
-        closing = m.group(3)
-        if filename in existing:
-            return m.group(0)
-        sub = replacements.get(filename)
-        return f'[[File:{sub}{options}{closing}' if sub else ''
-
-    return _FILE_REF_RE.sub(apply_replacement, content)
 
 
 def _insert_image(content: str, filename: str, caption: str, placement: str) -> str:
@@ -570,7 +540,7 @@ class WikiAgent:
         )
         content = self._call_ai(prompt)
         content = self._resolve_image_placeholders(content)
-        content = _fix_file_references(content, self.wiki)
+        content = self._fix_broken_image_refs(content)
         return {
             'content': content,
             'summary': f'Create: {title}',
@@ -588,7 +558,7 @@ class WikiAgent:
         )
         new_content = self._call_ai(prompt)
         new_content = self._resolve_image_placeholders(new_content)
-        return _fix_file_references(new_content, self.wiki)
+        return self._fix_broken_image_refs(new_content)
 
     def _execute_find_replace_step(self, step: OperationStep) -> dict:
         # Extract pairs from step description via AI
@@ -667,15 +637,18 @@ class WikiAgent:
     def _prepare_add_image_content(self, step: OperationStep) -> None:
         """Populate step.content/diff/images without writing to wiki. Raises on failure.
 
-        Section-aware: analyses the page's sections and adds 1–3 images, one per
-        chosen section, skipping sections that already contain an image. All AI
-        calls use Haiku (filenames/text only — no image pixel analysis) to keep
-        cost down.
+        Section-aware: analyses the page's sections and adds 2–3 images, one per
+        chosen section, skipping sections that already contain an image. Gracefully
+        degrades to fewer images if some searches fail. All AI calls use Haiku
+        (filenames/text only — no image pixel analysis) to keep cost down.
         """
         page = self.wiki.get_page(step.title)
         if not page.get('exists') or not page.get('content'):
             raise ValueError(f'Page "{step.title}" not found or empty')
         content = page['content']
+
+        # Repair broken image references before analyzing sections.
+        content = self._fix_broken_image_refs(content)
 
         # Candidate sections = those that don't already have an image.
         sections = [s for s in _split_sections(content) if not s['has_image']]
@@ -693,6 +666,7 @@ class WikiAgent:
             name = entry.get('section', '').strip()
             query = (entry.get('query') or name or step.title).strip()
             placement = placement_by_name.get(name, 'after_lead')
+            caption = (entry.get('caption') or name or step.title).strip()
             try:
                 results = self.wiki.search_commons_images(query, limit=5)
             except Exception:
@@ -701,12 +675,24 @@ class WikiAgent:
                 candidates.append({
                     'name': name,
                     'placement': placement,
-                    'caption': (entry.get('caption') or name or step.title).strip(),
+                    'caption': caption,
                     'results': results,
                 })
+            else:
+                web_images = self._search_web_images(query, limit=3)
+                for web_img in web_images:
+                    uploaded = self._download_and_upload_image(web_img['url'], name, caption)
+                    if uploaded:
+                        candidates.append({
+                            'name': name,
+                            'placement': placement,
+                            'caption': caption,
+                            'results': [uploaded],
+                        })
+                        break
 
         if not candidates:
-            raise ValueError(f'No images found on Commons for "{step.title}"')
+            raise ValueError(f'No images found for "{step.title}" (tried Commons and web search)')
 
         picks = self._pick_best_images(candidates)
 
@@ -733,7 +719,7 @@ class WikiAgent:
             })
 
         if not images:
-            raise ValueError(f'No images found on Commons for "{step.title}"')
+            raise ValueError(f'No images found for "{step.title}" (tried Commons and web search)')
 
         step.content = new_content
         step.old_content = content
@@ -743,7 +729,7 @@ class WikiAgent:
         step.commons_url = images[0]['commons_url']
 
     def _select_image_sections(self, step: OperationStep, sections: list[dict]) -> list[dict]:
-        """Haiku call: choose 1–3 sections to illustrate, with a query + caption each."""
+        """Haiku call: choose 2–3 sections to illustrate, with a query + caption each."""
         section_blocks = '\n\n'.join(
             f'- Section: {s["name"]}\n  Content: {s["text"][:400]}' for s in sections
         )
@@ -751,10 +737,9 @@ class WikiAgent:
         prompt = (
             f'You are choosing where to add images to the wiki page "{step.title}".\n\n'
             f'These are the sections that do NOT yet have an image:\n\n{section_blocks}{context_hint}\n\n'
-            'Choose between 1 and 3 of these sections that would most benefit from an '
-            'illustrative image (decide the count based on the content — only pick a '
-            'section if an image genuinely adds value). For each chosen section provide '
-            'a concise Wikimedia Commons search query and a short caption.\n\n'
+            'Choose 2 to 3 of these sections that would benefit from an illustrative image. '
+            'Prioritize breadth and coverage. For each chosen section provide a concise '
+            'Wikimedia Commons search query and a short caption.\n\n'
             'Return ONLY JSON: '
             '{"images": [{"section": "<exact section name>", '
             '"query": "commons search terms", "caption": "caption text"}]}'
@@ -766,9 +751,15 @@ class WikiAgent:
             picks = [p for p in picks if isinstance(p, dict) and p.get('section') in valid_names]
             return picks[:3]
         except Exception:
-            # Fall back to illustrating the first candidate section.
-            first = sections[0]
-            return [{'section': first['name'], 'query': step.title, 'caption': step.title}]
+            # Fall back to picking 2-3 sections by position when Haiku fails.
+            fallback = []
+            for i, section in enumerate(sections[:3]):
+                fallback.append({
+                    'section': section['name'],
+                    'query': section['name'],
+                    'caption': section['name'],
+                })
+            return fallback
 
     def _resolve_image_placeholders(self, content: str) -> str:
         """Replace {{COMMONS_IMAGE:query|caption}} placeholders with real Commons file refs.
@@ -798,6 +789,13 @@ class WikiAgent:
                 results = []
             if results:
                 candidates.append({'name': query, 'results': results})
+            else:
+                web_images = self._search_web_images(query, limit=3)
+                for web_img in web_images:
+                    uploaded = self._download_and_upload_image(web_img['url'], query, query)
+                    if uploaded:
+                        candidates.append({'name': query, 'results': [uploaded]})
+                        break
 
         picks = self._pick_best_images(candidates)
         chosen: dict[str, str] = {}
@@ -839,6 +837,122 @@ class WikiAgent:
             return [max(0, int(raw.get(str(i + 1), 1)) - 1) for i in range(len(candidates))]
         except Exception:
             return [0] * len(candidates)
+
+    def _search_web_images(self, query: str, limit: int = 3) -> list[dict]:
+        """Search DuckDuckGo for images with fallback to alternative queries.
+
+        Tries original query first, then falls back to alternative queries if no results.
+        Returns list of {url, title, image} or empty list if all queries fail.
+        """
+        queries = [query]
+        queries.extend(self._generate_image_search_queries(query))
+
+        for q in queries:
+            try:
+                results = DDGS().images(q, max_results=limit)
+                valid_results = [
+                    {'url': r.get('image'), 'title': r.get('title', ''), 'source': r.get('source', '')}
+                    for r in results if r.get('image')
+                ]
+                if valid_results:
+                    return valid_results
+            except Exception:
+                continue
+        return []
+
+    def _fix_broken_image_refs(self, content: str) -> str:
+        """Repair broken [[File:...]] references that don't exist locally or on Commons.
+
+        For each missing file: tries Commons search, then web search + upload fallback.
+        Preserves file options and removes refs if no replacement found.
+        """
+        matches = list(_FILE_REF_RE.finditer(content))
+        if not matches:
+            return content
+        filenames = [m.group(1).strip() for m in matches]
+        try:
+            local_ok = self.wiki.check_local_files_exist(filenames)
+            commons_ok = WikiClient.check_commons_files_exist(filenames)
+            existing = local_ok | commons_ok
+        except Exception:
+            return content
+
+        replacements = {}
+        for m in matches:
+            filename = m.group(1).strip()
+            if filename in existing or filename in replacements:
+                continue
+            query = re.sub(r'\.[^.]+$', '', filename).replace('_', ' ').replace('-', ' ')
+            replacement = None
+
+            try:
+                results = self.wiki.search_commons_images(query, limit=3)
+                if results:
+                    replacement = results[0]['filename']
+            except Exception:
+                pass
+
+            if not replacement:
+                web_images = self._search_web_images(query, limit=2)
+                for web_img in web_images:
+                    uploaded = self._download_and_upload_image(web_img['url'], query, query)
+                    if uploaded:
+                        replacement = uploaded['filename']
+                        break
+
+            replacements[filename] = replacement
+
+        def apply_replacement(m):
+            filename = m.group(1).strip()
+            options = m.group(2) or ''
+            closing = m.group(3)
+            if filename in existing:
+                return m.group(0)
+            sub = replacements.get(filename)
+            return f'[[File:{sub}{options}{closing}' if sub else ''
+
+        return _FILE_REF_RE.sub(apply_replacement, content)
+
+    def _generate_image_search_queries(self, term: str) -> list[str]:
+        """Generate alternative search queries for a given term using Haiku.
+
+        Returns list of 2-3 alternative search terms to try if the original fails.
+        """
+        prompt = (
+            f'Generate 2-3 alternative search terms for finding images related to: "{term}"\n\n'
+            f'If this is a technical/specific term, suggest simpler or broader alternatives.\n'
+            f'If it contains multiple concepts, suggest singular forms or related concepts.\n'
+            f'Return ONLY a JSON array of strings, e.g.: ["term1", "term2", "term3"]\n'
+            f'Keep terms concise (1-3 words each).'
+        )
+        try:
+            data = _extract_json(self._call_ai(prompt, model='claude-haiku-4-5-20251001'))
+            if isinstance(data, list):
+                return [str(q).strip() for q in data if q][:3]
+        except Exception:
+            pass
+        return []
+
+    def _download_and_upload_image(self, url: str, section_name: str, caption: str) -> Optional[dict]:
+        """Download image from URL and upload to wiki. Returns {filename, commons_url} or None on failure."""
+        try:
+            resp = requests.get(url, timeout=10, headers={'User-Agent': 'WikiGen/1.0'})
+            resp.raise_for_status()
+            mime_type = resp.headers.get('content-type', 'image/jpeg').split(';')[0]
+            if not mime_type.startswith('image/'):
+                return None
+
+            safe_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', section_name[:30])
+            filename = f"{safe_name}_{uuid.uuid4().hex[:8]}.jpg"
+            domain = re.sub(r'https?://(www\.)?', '', url.split('/')[2]) if url else 'web'
+            description = f"Web-sourced image for section '{section_name}'. Source: {url}"
+
+            result = self.wiki.upload_file(filename, resp.content, mime_type, description)
+            if result.get('success'):
+                return {'filename': filename, 'commons_url': url, 'title': caption}
+        except Exception:
+            pass
+        return None
 
     def _execute_add_image_step(self, step: OperationStep) -> dict:
         if not step.content:

@@ -369,6 +369,27 @@ class WikiClient:
                 result.append(link)
         return result
 
+    def check_local_files_exist(self, filenames: list[str]) -> set[str]:
+        """Return the subset of filenames that exist in this wiki's File namespace."""
+        if not filenames:
+            return set()
+        self._ensure_csrf()
+        existing = set()
+        for i in range(0, len(filenames), 50):
+            batch = filenames[i:i + 50]
+            r = self._session.get(self._url, params={
+                'action': 'query',
+                'titles': '|'.join(f'File:{f}' for f in batch),
+                'prop': 'imageinfo',
+                'format': 'json',
+            }, timeout=10)
+            r.raise_for_status()
+            for page in r.json().get('query', {}).get('pages', {}).values():
+                pid = page.get('pageid', -1)
+                if pid != -1 and int(pid) > 0 and 'imageinfo' in page:
+                    existing.add(page['title'][5:])  # strip "File:"
+        return existing
+
     @staticmethod
     def check_commons_files_exist(filenames: list[str]) -> set[str]:
         """Return the subset of filenames that actually exist on Wikimedia Commons."""
