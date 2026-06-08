@@ -695,11 +695,17 @@ class WikiAgent:
             query = step.title if i == 0 else f'{step.title} {name}'
 
             # Primary: Google Image Search → download → upload.
-            # Google Custom Search indexes less than google.com, so retry with a
-            # progressively shorter query before giving up.
+            # Google Custom Search indexes less than google.com, so retry with
+            # progressively shorter queries. API errors (quota, billing, etc.)
+            # are caught here so Wikipedia always gets a chance as fallback.
             google_results = []
+            google_error = ''
             for attempt_query in _shorten_queries(query):
-                google_results = self._search_google_images(attempt_query, limit=3)
+                try:
+                    google_results = self._search_google_images(attempt_query, limit=3)
+                except ValueError as exc:
+                    google_error = str(exc)
+                    break  # API error won't change per query — stop retrying
                 if google_results:
                     break
             if google_results:
@@ -719,6 +725,9 @@ class WikiAgent:
             if wp_results:
                 candidates.append({'name': name, 'placement': placement,
                                    'caption': caption, 'results': wp_results})
+            elif google_error:
+                # Surface the Google error only if Wikipedia also found nothing
+                raise ValueError(google_error)
 
         if not candidates:
             raise ValueError(f'No images found for "{step.title}" (tried Google and Wikipedia)')
@@ -807,7 +816,10 @@ class WikiAgent:
             # Primary: Google Image Search → download → upload (with query shortening retry)
             google_results = []
             for attempt_query in _shorten_queries(query):
-                google_results = self._search_google_images(attempt_query, limit=3)
+                try:
+                    google_results = self._search_google_images(attempt_query, limit=3)
+                except ValueError:
+                    break  # API error — skip to Wikipedia fallback
                 if google_results:
                     break
             if google_results:
@@ -870,8 +882,7 @@ class WikiAgent:
         """Search Google Custom Search API for images.
 
         Returns [{url, source_page_url, title}] or [] if unconfigured or on no results.
-        Raises ValueError with the API error message on authentication/quota failures so
-        the caller can surface the problem rather than silently skipping images.
+        Raises ValueError with the API error message on authentication/quota failures.
         Requires GOOGLE_API_KEY and GOOGLE_CSE_ID environment variables.
         """
         api_key = os.environ.get('GOOGLE_API_KEY', '')
