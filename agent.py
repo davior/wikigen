@@ -667,10 +667,10 @@ class WikiAgent:
     def _prepare_add_image_content(self, step: OperationStep) -> None:
         """Populate step.content/diff/images without writing to wiki. Raises on failure.
 
-        Section-aware: analyses the page's sections and adds 1–3 images, one per
-        chosen section, skipping sections that already contain an image. All AI
-        calls use Haiku (filenames/text only — no image pixel analysis) to keep
-        cost down.
+        Section-aware: analyses the page's sections and adds 2–3 images, one per
+        chosen section, skipping sections that already contain an image. Gracefully
+        degrades to fewer images if some searches fail. All AI calls use Haiku
+        (filenames/text only — no image pixel analysis) to keep cost down.
         """
         page = self.wiki.get_page(step.title)
         if not page.get('exists') or not page.get('content'):
@@ -743,7 +743,7 @@ class WikiAgent:
         step.commons_url = images[0]['commons_url']
 
     def _select_image_sections(self, step: OperationStep, sections: list[dict]) -> list[dict]:
-        """Haiku call: choose 1–3 sections to illustrate, with a query + caption each."""
+        """Haiku call: choose 2–3 sections to illustrate, with a query + caption each."""
         section_blocks = '\n\n'.join(
             f'- Section: {s["name"]}\n  Content: {s["text"][:400]}' for s in sections
         )
@@ -751,10 +751,9 @@ class WikiAgent:
         prompt = (
             f'You are choosing where to add images to the wiki page "{step.title}".\n\n'
             f'These are the sections that do NOT yet have an image:\n\n{section_blocks}{context_hint}\n\n'
-            'Choose between 1 and 3 of these sections that would most benefit from an '
-            'illustrative image (decide the count based on the content — only pick a '
-            'section if an image genuinely adds value). For each chosen section provide '
-            'a concise Wikimedia Commons search query and a short caption.\n\n'
+            'Choose 2 to 3 of these sections that would benefit from an illustrative image. '
+            'Prioritize breadth and coverage. For each chosen section provide a concise '
+            'Wikimedia Commons search query and a short caption.\n\n'
             'Return ONLY JSON: '
             '{"images": [{"section": "<exact section name>", '
             '"query": "commons search terms", "caption": "caption text"}]}'
@@ -766,9 +765,15 @@ class WikiAgent:
             picks = [p for p in picks if isinstance(p, dict) and p.get('section') in valid_names]
             return picks[:3]
         except Exception:
-            # Fall back to illustrating the first candidate section.
-            first = sections[0]
-            return [{'section': first['name'], 'query': step.title, 'caption': step.title}]
+            # Fall back to picking 2-3 sections by position when Haiku fails.
+            fallback = []
+            for i, section in enumerate(sections[:3]):
+                fallback.append({
+                    'section': section['name'],
+                    'query': section['name'],
+                    'caption': section['name'],
+                })
+            return fallback
 
     def _resolve_image_placeholders(self, content: str) -> str:
         """Replace {{COMMONS_IMAGE:query|caption}} placeholders with real Commons file refs.
