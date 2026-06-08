@@ -702,7 +702,7 @@ class WikiAgent:
             google_error = ''
             for attempt_query in _shorten_queries(query):
                 try:
-                    google_results = self._search_google_images(attempt_query, limit=3)
+                    google_results = self._search_bing_images(attempt_query, limit=3)
                 except ValueError as exc:
                     google_error = str(exc)
                     break  # API error won't change per query — stop retrying
@@ -817,7 +817,7 @@ class WikiAgent:
             google_results = []
             for attempt_query in _shorten_queries(query):
                 try:
-                    google_results = self._search_google_images(attempt_query, limit=3)
+                    google_results = self._search_bing_images(attempt_query, limit=3)
                 except ValueError:
                     break  # API error — skip to Wikipedia fallback
                 if google_results:
@@ -878,35 +878,32 @@ class WikiAgent:
         except Exception:
             return [0] * len(candidates)
 
-    def _search_google_images(self, query: str, limit: int = 5) -> list[dict]:
-        """Search Google Custom Search API for images.
+    def _search_bing_images(self, query: str, limit: int = 5) -> list[dict]:
+        """Search Bing Image Search API for images.
 
-        Returns [{url, source_page_url, title}] or [] if unconfigured or on no results.
-        Raises ValueError with the API error message on authentication/quota failures.
-        Requires GOOGLE_API_KEY and GOOGLE_CSE_ID environment variables.
+        Returns [{url, source_page_url, title}] or [] if unconfigured or no results.
+        Raises ValueError with the API error on authentication/quota failures.
+        Requires BING_API_KEY environment variable.
         """
-        api_key = os.environ.get('GOOGLE_API_KEY', '')
-        cse_id = os.environ.get('GOOGLE_CSE_ID', '')
-        if not api_key or not cse_id:
+        api_key = os.environ.get('BING_API_KEY', '')
+        if not api_key:
             return []
         try:
-            r = requests.get('https://www.googleapis.com/customsearch/v1', params={
-                'key': api_key,
-                'cx': cse_id,
-                'searchType': 'image',
+            r = requests.get('https://api.bing.microsoft.com/v7.0/images/search', params={
                 'q': query,
-                'num': min(limit, 10),
-            }, timeout=10)
+                'count': min(limit, 10),
+                'safeSearch': 'Moderate',
+            }, headers={'Ocp-Apim-Subscription-Key': api_key}, timeout=10)
             if not r.ok:
                 err = r.json().get('error', {}).get('message', r.text[:200])
-                raise ValueError(f'Google API error {r.status_code}: {err}')
+                raise ValueError(f'Bing API error {r.status_code}: {err}')
             return [
                 {
-                    'url': item['link'],
-                    'source_page_url': item.get('image', {}).get('contextLink', ''),
-                    'title': item.get('title', ''),
+                    'url': item['contentUrl'],
+                    'source_page_url': item.get('hostPageUrl', ''),
+                    'title': item.get('name', ''),
                 }
-                for item in r.json().get('items', []) if item.get('link')
+                for item in r.json().get('value', []) if item.get('contentUrl')
             ]
         except ValueError:
             raise
@@ -946,7 +943,7 @@ class WikiAgent:
                 pass
 
             if not replacement:
-                google_results = self._search_google_images(query, limit=2)
+                google_results = self._search_bing_images(query, limit=2)
                 for g_img in google_results:
                     uploaded = self._download_and_upload_image(
                         g_img['url'], query, query, g_img.get('source_page_url', ''))
