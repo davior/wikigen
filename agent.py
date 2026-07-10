@@ -1,5 +1,6 @@
 import concurrent.futures
 import json
+import logging
 import queue
 import re
 import requests
@@ -17,6 +18,8 @@ from imagescout import ImageResult
 
 from image_search import search_images
 from wiki_client import WikiClient
+
+logger = logging.getLogger(__name__)
 
 
 # ─── SYSTEM PROMPT ───────────────────────────────────────────────────────────
@@ -690,8 +693,12 @@ class WikiAgent:
             except Exception:
                 wp_results = []
             if wp_results:
+                logger.info('image fallback: Wikipedia/Commons used for section %r (%d result(s))',
+                            name, len(wp_results))
                 candidates.append({'name': name, 'placement': placement,
                                    'caption': caption, 'results': wp_results})
+            else:
+                logger.info('image search: nothing found for section %r (imagescout + Wikipedia both empty)', name)
 
         if not candidates:
             raise ValueError(f'No images found for "{step.title}" (tried imagescout and Wikipedia)')
@@ -790,7 +797,11 @@ class WikiAgent:
             except Exception:
                 wp_results = []
             if wp_results:
+                logger.info('image fallback: Wikipedia/Commons used for %r (%d result(s))',
+                            query, len(wp_results))
                 candidates.append({'name': query, 'results': wp_results})
+            else:
+                logger.info('image search: nothing found for %r (imagescout + Wikipedia both empty)', query)
 
         picks = self._pick_best_images(candidates)
         chosen: dict[str, str] = {}
@@ -871,6 +882,11 @@ class WikiAgent:
                     if uploaded:
                         replacement = uploaded['filename']
                         break
+
+            if replacement:
+                logger.info('broken image ref repair: replaced %r with %r', filename, replacement)
+            else:
+                logger.info('broken image ref repair: no replacement found for %r, removing', filename)
 
             replacements[filename] = replacement
 

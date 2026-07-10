@@ -84,8 +84,13 @@ def search_images(query: str, *, limit: int = 5, shorten: bool = True) -> list[I
                 logger.exception('imagescout: search() raised for query %r', attempt_query)
                 continue
             if outcome.ok:
+                logger.info('imagescout: %d result(s) for %r via %s',
+                            len(outcome.results), attempt_query, outcome.results[0].engine)
                 return outcome.results
             if outcome.failures:
-                logger.debug('imagescout: no results for %r (failures: %s)',
-                              attempt_query, [(f.engine, f.error) for f in outcome.failures])
+                logger.info('imagescout: no results for %r (failures: %s)',
+                             attempt_query, [(f.engine, f.error) for f in outcome.failures])
+            else:
+                logger.info('imagescout: no results for %r (no failures reported)', attempt_query)
+    logger.info('imagescout: exhausted all query variants for %r, nothing found', query)
     return []

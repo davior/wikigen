@@ -6,6 +6,7 @@ connections.json
 history.json
 plans/
 uploads/
+wikigen.log*
 *.egg-info/
 dist/
 build/
