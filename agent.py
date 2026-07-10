@@ -1,6 +1,6 @@
 import concurrent.futures
 import json
-import os
+import logging
 import queue
 import re
 import requests
@@ -14,7 +14,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Callable
 
+from imagescout import ImageResult
+
+from image_search import search_images
 from wiki_client import WikiClient
+
+logger = logging.getLogger(__name__)
 
 
 # ─── SYSTEM PROMPT ───────────────────────────────────────────────────────────
@@ -224,28 +229,6 @@ def _format_site_index(pages: dict) -> str:
 _FILE_REF_RE = re.compile(r'\[\[(?:File|Image):([^|\]]+)(\|[^\]]*)?(\]\])', re.IGNORECASE)
 _IMAGE_PLACEHOLDER_RE = re.compile(r'\{\{COMMONS_IMAGE:([^|}]*?)(?:\|([^}]*))?\}\}', re.IGNORECASE)
 MAX_PLACEHOLDER_IMAGES = 3
-
-
-def _shorten_queries(query: str) -> list[str]:
-    """Return a list of progressively shorter variants of a search query.
-
-    Bing Image Search indexes less content than bing.com; dropping trailing words
-    often finds results when the exact phrase has no indexed images.
-    e.g. "DARPA N3 Programme" → ["DARPA N3 Programme", "DARPA N3", "DARPA"]
-    Always includes at least the original query.
-    """
-    words = query.split()
-    queries = [query]
-    while len(words) > 1:
-        words = words[:-1]
-        shorter = ' '.join(words)
-        if shorter not in queries:
-            queries.append(shorter)
-    return queries
-
-
-
-
 
 
 def _insert_image(content: str, filename: str, caption: str, placement: str) -> str:
@@ -694,41 +677,31 @@ class WikiAgent:
             # Remaining images: title + section name for specificity.
             query = step.title if i == 0 else f'{step.title} {name}'
 
-            # Primary: Bing Image Search → download → upload.
-            # Retry with progressively shorter queries; API errors (quota, key)
-            # are caught here so Wikipedia always gets a chance as fallback.
-            bing_results = []
-            bing_error = ''
-            for attempt_query in _shorten_queries(query):
-                try:
-                    bing_results = self._search_bing_images(attempt_query, limit=3)
-                except ValueError as exc:
-                    bing_error = str(exc)
-                    break  # API error won't change per query — stop retrying
-                if bing_results:
-                    break
-            if bing_results:
-                img = bing_results[0]
-                uploaded = self._download_and_upload_image(
-                    img['url'], name, caption, img.get('source_page_url', ''))
+            # Primary: imagescout (DuckDuckGo) → download → upload.
+            results = search_images(query, limit=3)
+            if results:
+                uploaded = self._download_and_upload_image(results[0], name, caption)
                 if uploaded:
                     candidates.append({'name': name, 'placement': placement,
                                        'caption': caption, 'results': [uploaded]})
                     continue
 
-            # Fallback: Wikipedia article images (on Commons, no key needed)
+            # Fallback: Wikipedia article images (on Commons, no key needed;
+            # the licensing safety net — verifiably reusable source).
             try:
                 wp_results = WikiClient.search_wikipedia_images(step.title, limit=5)
             except Exception:
                 wp_results = []
             if wp_results:
+                logger.info('image fallback: Wikipedia/Commons used for section %r (%d result(s))',
+                            name, len(wp_results))
                 candidates.append({'name': name, 'placement': placement,
                                    'caption': caption, 'results': wp_results})
-            elif bing_error:
-                raise ValueError(bing_error)
+            else:
+                logger.info('image search: nothing found for section %r (imagescout + Wikipedia both empty)', name)
 
         if not candidates:
-            raise ValueError(f'No images found for "{step.title}" (tried Bing and Wikipedia)')
+            raise ValueError(f'No images found for "{step.title}" (tried imagescout and Wikipedia)')
 
         picks = self._pick_best_images(candidates)
 
@@ -755,7 +728,7 @@ class WikiAgent:
             })
 
         if not images:
-            raise ValueError(f'No images found for "{step.title}" (tried Bing and Wikipedia)')
+            raise ValueError(f'No images found for "{step.title}" (tried imagescout and Wikipedia)')
 
         step.content = new_content
         step.old_content = content
@@ -811,19 +784,10 @@ class WikiAgent:
         # Find and upload an image for each placeholder query.
         candidates = []  # [{name: query, results}]
         for query in kept_queries:
-            # Primary: Bing Image Search → download → upload (with query shortening retry)
-            bing_results = []
-            for attempt_query in _shorten_queries(query):
-                try:
-                    bing_results = self._search_bing_images(attempt_query, limit=3)
-                except ValueError:
-                    break  # API error — skip to Wikipedia fallback
-                if bing_results:
-                    break
-            if bing_results:
-                img = bing_results[0]
-                uploaded = self._download_and_upload_image(
-                    img['url'], query, query, img.get('source_page_url', ''))
+            # Primary: imagescout (DuckDuckGo) → download → upload.
+            results = search_images(query, limit=3)
+            if results:
+                uploaded = self._download_and_upload_image(results[0], query, query)
                 if uploaded:
                     candidates.append({'name': query, 'results': [uploaded]})
                     continue
@@ -833,7 +797,11 @@ class WikiAgent:
             except Exception:
                 wp_results = []
             if wp_results:
+                logger.info('image fallback: Wikipedia/Commons used for %r (%d result(s))',
+                            query, len(wp_results))
                 candidates.append({'name': query, 'results': wp_results})
+            else:
+                logger.info('image search: nothing found for %r (imagescout + Wikipedia both empty)', query)
 
         picks = self._pick_best_images(candidates)
         chosen: dict[str, str] = {}
@@ -876,38 +844,6 @@ class WikiAgent:
         except Exception:
             return [0] * len(candidates)
 
-    def _search_bing_images(self, query: str, limit: int = 5) -> list[dict]:
-        """Search Bing Image Search API for images.
-
-        Returns [{url, source_page_url, title}] or [] if unconfigured or no results.
-        Raises ValueError with the API error on authentication/quota failures.
-        Requires BING_API_KEY environment variable.
-        """
-        api_key = os.environ.get('BING_API_KEY', '')
-        if not api_key:
-            return []
-        try:
-            r = requests.get('https://api.bing.microsoft.com/v7.0/images/search', params={
-                'q': query,
-                'count': min(limit, 10),
-                'safeSearch': 'Moderate',
-            }, headers={'Ocp-Apim-Subscription-Key': api_key}, timeout=10)
-            if not r.ok:
-                err = r.json().get('error', {}).get('message', r.text[:200])
-                raise ValueError(f'Bing API error {r.status_code}: {err}')
-            return [
-                {
-                    'url': item['contentUrl'],
-                    'source_page_url': item.get('hostPageUrl', ''),
-                    'title': item.get('name', ''),
-                }
-                for item in r.json().get('value', []) if item.get('contentUrl')
-            ]
-        except ValueError:
-            raise
-        except Exception:
-            return []
-
     def _fix_broken_image_refs(self, content: str) -> str:
         """Repair broken [[File:...]] references that don't exist locally or on Commons.
 
@@ -941,13 +877,16 @@ class WikiAgent:
                 pass
 
             if not replacement:
-                bing_results = self._search_bing_images(query, limit=2)
-                for g_img in bing_results:
-                    uploaded = self._download_and_upload_image(
-                        g_img['url'], query, query, g_img.get('source_page_url', ''))
+                for img in search_images(query, limit=2):
+                    uploaded = self._download_and_upload_image(img, query, query)
                     if uploaded:
                         replacement = uploaded['filename']
                         break
+
+            if replacement:
+                logger.info('broken image ref repair: replaced %r with %r', filename, replacement)
+            else:
+                logger.info('broken image ref repair: no replacement found for %r, removing', filename)
 
             replacements[filename] = replacement
 
@@ -962,28 +901,27 @@ class WikiAgent:
 
         return _FILE_REF_RE.sub(apply_replacement, content)
 
-    def _download_and_upload_image(self, url: str, section_name: str, caption: str,
-                                   source_page_url: str = '') -> Optional[dict]:
-        """Download image from URL and upload to wiki. Returns {filename, commons_url} or None on failure."""
+    def _download_and_upload_image(self, img: ImageResult, section_name: str,
+                                   caption: str) -> Optional[dict]:
+        """Download an imagescout result and upload to wiki. Returns {filename, commons_url} or None on failure."""
         try:
-            resp = requests.get(url, timeout=10, headers={'User-Agent': 'WikiGen/1.0'})
+            resp = requests.get(img.image_url, timeout=10, headers={'User-Agent': 'WikiGen/1.0'})
             resp.raise_for_status()
             mime_type = resp.headers.get('content-type', 'image/jpeg').split(';')[0]
             if not mime_type.startswith('image/'):
                 return None
 
-            ext_match = re.search(r'\.(jpe?g|png|gif|webp|svg)(?:[?#]|$)', url, re.IGNORECASE)
+            ext_match = re.search(r'\.(jpe?g|png|gif|webp|svg)(?:[?#]|$)', img.image_url, re.IGNORECASE)
             ext = ext_match.group(1).lower() if ext_match else 'jpg'
             if ext == 'jpeg':
                 ext = 'jpg'
             safe_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', (caption or section_name)[:40])
             filename = f"{safe_name}_{uuid.uuid4().hex[:8]}.{ext}"
-            source_attr = source_page_url or url
-            description = f"{caption or section_name}.\nSource: {source_attr}"
+            description = f"{caption or section_name}.\n{img.attribution()}"
 
             result = self.wiki.upload_file(filename, resp.content, mime_type, description)
             if result.get('success'):
-                return {'filename': filename, 'commons_url': url, 'title': caption}
+                return {'filename': filename, 'commons_url': img.image_url, 'title': caption}
         except Exception:
             pass
         return None

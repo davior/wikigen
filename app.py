@@ -1,5 +1,6 @@
 import io
 import json
+import logging
 import mimetypes
 import os
 import queue
@@ -8,6 +9,7 @@ import threading
 import uuid
 import dataclasses
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import anthropic
@@ -26,6 +28,15 @@ app.secret_key = os.environ.get('FLASK_SECRET', 'wikigen-dev-secret')
 CORS(app)
 
 DATA_DIR = Path(os.environ.get('DATA_DIR', '.'))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+    handlers=[
+        RotatingFileHandler(DATA_DIR / 'wikigen.log', maxBytes=5_000_000, backupCount=3),
+        logging.StreamHandler(),
+    ],
+)
 CONNECTIONS_FILE = DATA_DIR / 'connections.json'
 HISTORY_FILE = DATA_DIR / 'history.json'
 PLANS_DIR = DATA_DIR / 'plans'
