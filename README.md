@@ -50,6 +50,8 @@ pip install -r requirements.txt
 
 If you prefer not to use a virtual environment, you can still install the requirements globally, but a venv is recommended.
 
+> **Note:** `requirements.txt` pulls `imagescout` (used for image search) directly from its private GitHub repo. The environment running `pip install` — locally, in CI, or on the deploy target — needs git credentials with access to `davior/imagescout` (e.g. an SSH key or a credential-embedded HTTPS remote), or the install will fail.
+
 ---
 
 ## Configuration

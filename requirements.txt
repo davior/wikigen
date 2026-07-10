@@ -8,3 +8,6 @@ python-docx>=1.1.0
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
 html2text>=2024.1.1
+
+# Private repo pin — install-time git credentials required for davior/imagescout (see README).
+imagescout @ git+https://github.com/davior/imagescout.git@5c63b4eb86a7378c2e479edd431511d0b5cec8fc
