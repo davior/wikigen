@@ -4,7 +4,7 @@ import requests
 
 
 class WikiClient:
-    def __init__(self, wiki_url: str, username: str, password: str):
+    def __init__(self, wiki_url: str, username: str, password: str, api_token: str | None = None):
         self._url = wiki_url
         self._username = username
         self._password = password
@@ -12,6 +12,8 @@ class WikiClient:
         self._session.headers.update({
             'User-Agent': 'WikiGen/3.0 (wiki management bot; https://github.com/davior/wikigen)',
         })
+        if api_token:
+            self._session.headers.update({'X-Wikigen-Token': api_token})
         self._csrf_token = None
         self._connected = False
         self._last_write_time = 0.0

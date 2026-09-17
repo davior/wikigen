@@ -61,6 +61,7 @@ def _load_connections() -> dict:
             'wiki_url': os.environ['WIKI_URL'],
             'username': os.environ.get('WIKI_USERNAME', ''),
             'password': os.environ.get('WIKI_PASSWORD', ''),
+            'api_token': os.environ.get('WIKIGEN_API_TOKEN', ''),
             'system_prompt': '',
             'chips': [],
         })
@@ -101,7 +102,8 @@ def get_wiki_client(connection_id: str) -> WikiClient | None:
     conn = _get_connection_by_id(connection_id)
     if not conn:
         return None
-    client = WikiClient(conn['wiki_url'], conn['username'], conn['password'])
+    client = WikiClient(conn['wiki_url'], conn['username'], conn['password'],
+                        conn.get('api_token') or os.environ.get('WIKIGEN_API_TOKEN'))
     client.connect()
     _wiki_clients[connection_id] = client
     return client
