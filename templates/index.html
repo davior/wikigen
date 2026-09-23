@@ -1309,12 +1309,12 @@ function setStepGeneratingUI(stepId, state) {
   el.querySelector('.step-content-preview')?.remove();
   el.classList.remove('generating');
   const dot = el.querySelector('.step-status-dot');
-  if (state === 'generating') {
+  if (state === 'generating' || state === 'queued') {
     el.classList.add('generating');
     if (dot) dot.className = 'step-status-dot generating';
     const msg = document.createElement('div');
     msg.className = 'step-generating-msg';
-    msg.textContent = '⟳ GENERATING CONTENT…';
+    msg.textContent = state === 'queued' ? '… QUEUED FOR GENERATION' : '⟳ GENERATING CONTENT…';
     el.appendChild(msg);
   } else if (state === 'ready') {
     const step = findStep(stepId);
@@ -1339,26 +1339,40 @@ async function generateStepContent(stepId) {
   const ctrl = new AbortController();
   _abortControllers[stepId] = ctrl;
   _generatingSteps.add(stepId);
-  setStepGeneratingUI(stepId, 'generating');
+  setStepGeneratingUI(stepId, 'queued');
   updateExecuteBtn();
 
+  const planId = currentPlan.plan_id;
+  let haveSlot = false;
   try {
+    await acquireGenerationSlot(ctrl.signal);
+    haveSlot = true;
+    setStepGeneratingUI(stepId, 'generating');
+
+    // Start the job, then poll: generation can take many minutes, so we don't
+    // hold one request open waiting for it.
     const resp = await fetch(API_BASE + '/api/agent/step/preview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plan_id: currentPlan.plan_id, step_id: stepId }),
+      body: JSON.stringify({ plan_id: planId, step_id: stepId }),
       signal: ctrl.signal,
     });
-    const data = await resp.json();
+    const started = await resp.json();
+    if (!resp.ok || started.error) throw new Error(started.error || `HTTP ${resp.status}`);
+
+    const status = await pollStepPreview(planId, stepId, ctrl.signal);
     const s = findStep(stepId);
-    if (s && data.step) Object.assign(s, data.step);
-    if (data.success) {
-      if (s) { s.status = 'approved'; updateStepElement(s); }
+    if (s && status.step) Object.assign(s, status.step);
+    if (status.state === 'done' && s?.content) {
+      s.status = 'approved';
+      s.error = null;
+      updateStepElement(s);
       setStepGeneratingUI(stepId, 'ready');
     } else {
-      if (s) { s.error = data.error || 'Preview failed'; updateStepElement(s); }
+      const error = status.error || 'Generation stopped without a result (was the server restarted?)';
+      if (s) { s.error = error; updateStepElement(s); }
       setStepGeneratingUI(stepId, 'error');
-      showToast(`Content generation failed: ${data.error || 'Unknown error'}`, 'error');
+      showToast(`Content generation failed: ${error}`, 'error');
     }
   } catch (err) {
     if (err.name !== 'AbortError') {
@@ -1370,10 +1384,62 @@ async function generateStepContent(stepId) {
       setStepGeneratingUI(stepId, 'error');
     }
   } finally {
+    if (haveSlot) releaseGenerationSlot();
     _generatingSteps.delete(stepId);
     delete _abortControllers[stepId];
     updateExecuteBtn();
   }
+}
+
+// Poll a background generation until it finishes. Network blips are retried;
+// the job keeps running on the server regardless.
+async function pollStepPreview(planId, stepId, signal) {
+  const url = `${API_BASE}/api/agent/step/preview/status?plan_id=${encodeURIComponent(planId)}&step_id=${encodeURIComponent(stepId)}`;
+  let failures = 0;
+  while (true) {
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(resolve, 3000);
+      signal.addEventListener('abort', () => { clearTimeout(t); reject(new DOMException('Aborted', 'AbortError')); }, { once: true });
+    });
+    try {
+      const resp = await fetch(url, { signal });
+      const status = await resp.json();
+      failures = 0;
+      if (status.state !== 'running') return status;
+    } catch (err) {
+      if (err.name === 'AbortError') throw err;
+      if (++failures >= 10) throw err;
+    }
+  }
+}
+
+// "Approve all" can request dozens of long generations at once. Run only a few
+// at a time so they don't pile up behind the browser's per-host connection
+// limit, the server's worker threads and the Anthropic rate limit.
+const MAX_CONCURRENT_GENERATIONS = 3;
+let _activeGenerations = 0;
+const _generationWaiters = [];
+
+function acquireGenerationSlot(signal) {
+  if (_activeGenerations < MAX_CONCURRENT_GENERATIONS) {
+    _activeGenerations++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const waiter = () => { _activeGenerations++; resolve(); };
+    _generationWaiters.push(waiter);
+    signal.addEventListener('abort', () => {
+      const i = _generationWaiters.indexOf(waiter);
+      if (i !== -1) _generationWaiters.splice(i, 1);
+      reject(new DOMException('Aborted', 'AbortError'));
+    }, { once: true });
+  });
+}
+
+function releaseGenerationSlot() {
+  _activeGenerations--;
+  const next = _generationWaiters.shift();
+  if (next) next();
 }
 
 async function executeApproved() {

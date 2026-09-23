@@ -18,12 +18,25 @@ def _short_reason(exc: Exception) -> str:
     return msg[:200]
 
 
+class _TimeoutSession(requests.Session):
+    """Session that applies a default timeout, so a wiki that stops answering
+    raises instead of hanging the calling thread forever."""
+
+    def __init__(self, timeout: float = 60):
+        super().__init__()
+        self._default_timeout = timeout
+
+    def request(self, *args, **kwargs):
+        kwargs.setdefault('timeout', self._default_timeout)
+        return super().request(*args, **kwargs)
+
+
 class WikiClient:
     def __init__(self, wiki_url: str, username: str, password: str, api_token: str | None = None):
         self._url = wiki_url
         self._username = username
         self._password = password
-        self._session = requests.Session()
+        self._session = _TimeoutSession()
         self._session.headers.update({
             'User-Agent': 'WikiGen/3.0 (wiki management bot; https://github.com/davior/wikigen)',
         })
