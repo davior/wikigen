@@ -1,5 +1,6 @@
 import concurrent.futures
 import json
+import logging
 import os
 import queue
 import re
@@ -15,6 +16,8 @@ from pathlib import Path
 from typing import Optional, Callable
 
 from wiki_client import WikiClient
+
+log = logging.getLogger(__name__)
 
 
 # ─── SYSTEM PROMPT ───────────────────────────────────────────────────────────
@@ -561,9 +564,15 @@ class WikiAgent:
             'The system will search Commons and pick the best matching file for each. '
             'Use up to 3 images. Do NOT use [[File:...]] with invented filenames.'
         )
+        t0 = time.monotonic()
         content = self._call_ai(prompt)
+        t1 = time.monotonic()
         content = self._resolve_image_placeholders(content)
+        t2 = time.monotonic()
         content = self._fix_broken_image_refs(content)
+        t3 = time.monotonic()
+        log.info('Generated "%s": text %.0fs (%d chars), image placeholders %.0fs, image refs %.0fs',
+                 title, t1 - t0, len(content), t2 - t1, t3 - t2)
         return {
             'content': content,
             'summary': f'Create: {title}',
