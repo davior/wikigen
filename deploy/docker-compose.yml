@@ -1,0 +1,29 @@
+# Synology Container Manager project for WikiGen.
+# Place this file in /volume1/docker/wikigen/ alongside .env and data/.
+services:
+  wikigen:
+    image: ghcr.io/davior/wikigen:latest
+    container_name: wikigen
+    # Run as your DSM user so the container can write to ./data.
+    # Find the numbers with `id` over SSH (typically 1026:100).
+    user: "1026:100"
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data
+    ports:
+      - "5055:5055"
+    restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+
+  watchtower:
+    image: containrrr/watchtower
+    container_name: wikigen-watchtower
+    command: --label-enable --cleanup --interval 300
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Uncomment if the GHCR package is private (see README):
+      # - ./config.json:/config.json:ro
+    restart: unless-stopped

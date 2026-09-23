@@ -29,10 +29,10 @@ DATA_DIR = Path(os.environ.get('DATA_DIR', '.'))
 CONNECTIONS_FILE = DATA_DIR / 'connections.json'
 HISTORY_FILE = DATA_DIR / 'history.json'
 PLANS_DIR = DATA_DIR / 'plans'
-PLANS_DIR.mkdir(exist_ok=True)
+PLANS_DIR.mkdir(parents=True, exist_ok=True)
 ARCHIVED_PLANS_FILE = DATA_DIR / 'archived_plans.json'
 UPLOADS_DIR = DATA_DIR / 'uploads'
-UPLOADS_DIR.mkdir(exist_ok=True)
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 site_index.set_storage_dir(DATA_DIR)
 
 anthropic_client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY', ''))
