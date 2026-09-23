@@ -23,7 +23,13 @@ services:
   watchtower:
     image: containrrr/watchtower
     container_name: wikigen-watchtower
-    command: --label-enable --cleanup --interval 300
+    # Update once a night rather than minutes after every merge: an update
+    # restarts WikiGen and kills any generation in progress. The schedule is
+    # 6-field cron in UTC; 17:00 UTC is 3 am at UTC+10. See the README to
+    # update immediately.
+    command: --label-enable --cleanup --schedule "0 0 17 * * *"
+    # Same bridge-network DNS problem as the app (lookups of ghcr.io fail).
+    network_mode: host
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # Uncomment if the GHCR package is private (see README):

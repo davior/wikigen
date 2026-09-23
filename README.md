@@ -114,11 +114,16 @@ Requires DSM 7.2+ with **Container Manager** on an x86 NAS.
 
 ### Day to day
 
-- **Update:** merge to `main`. The new version is live within ~5 minutes of the workflow finishing. Check Container Manager → Container → wikigen-watchtower → Log to watch it happen.
-- **Force update now:** Container Manager → Project → wikigen → Action → Build (re-pulls `latest`).
+- **Update:** merge to `main`. Watchtower installs the new image overnight (3 am at UTC+10; change `--schedule` in the compose file to suit). Check Container Manager → Container → wikigen-watchtower → Log to see it happen.
+- **Update now:** over SSH on the NAS, run a one-off Watchtower check:
+  ```bash
+  sudo docker run --rm --network host -v /var/run/docker.sock:/var/run/docker.sock \
+    containrrr/watchtower --run-once --cleanup wikigen
+  ```
+  It pulls `latest` and recreates `wikigen` only if the image changed, keeping the container's settings. (For a private package add `-v /volume1/docker/wikigen/config.json:/config.json:ro`.)
 - **Roll back:** change the image to a specific build, e.g. `ghcr.io/davior/wikigen:sha-1a2b3c4` (tags are listed on the package page), and rebuild the project. Switch back to `:latest` to resume auto-updates.
 
-Updates restart the container, and in-flight plans that haven't been saved to `plans/` are lost, so avoid merging mid-run.
+Updates restart the container and kill any generation or execution in progress, so don't force an update mid-run.
 
 ### Troubleshooting
 
