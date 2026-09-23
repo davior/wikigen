@@ -1,7 +1,6 @@
 import concurrent.futures
 import json
 import logging
-import os
 import queue
 import re
 import requests
@@ -15,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Callable
 
+import image_gen
 from wiki_client import WikiClient
 
 log = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ Step types you may produce:
 - move: Rename a page; title = destination, from_title = source
 - find_replace: Bulk text replacement across the wiki; title = "*"; describe find/replace pairs in description
 - ensure_disambig: Create a redirect or disambiguation page for an abbreviation
-- add_image: Source an image from Wikimedia Commons and embed it into an existing page
+- add_image: Generate 2-3 AI illustrations in the wiki's house style and embed them into an existing page (put any guidance on what to show in the description)
 - upload_file: Upload a document or file to the wiki file namespace; title = "File:<exact filename>" using the filename shown in [wiki filename: File:...] next to the document in the UPLOADED DOCUMENTS section. Do NOT set source_url for attached documents — the bytes are already saved. Only set source_url when the user explicitly provides a remote URL to fetch (not a URL found inside the document's content). After uploading, reference the file in page content as [[File:filename.ext]].
 - When the user has MULTIPLE documents and asks to upload all of them, create one upload_file step per document, each using the exact filename from its [wiki filename: ...] label.
 - When the user wants to find existing pages that should reference an uploaded file, scan the SITE INDEX for topically related pages and create edit steps for them that add [[File:filename.ext]] where appropriate.
@@ -128,9 +128,10 @@ class OperationStep:
     diff: Optional[str] = None
     image_file: Optional[str] = None
     commons_url: Optional[str] = None
-    images: list = field(default_factory=list)  # [{filename, commons_url, caption, section}]
+    images: list = field(default_factory=list)  # [{filename, caption, section, prompt}]
     source_url: Optional[str] = None
     upload_id: Optional[str] = None
+    notice: Optional[str] = None  # non-fatal problem worth showing, e.g. an image that failed
 
     def to_dict(self):
         return dataclasses.asdict(self)
@@ -225,30 +226,35 @@ def _format_site_index(pages: dict) -> str:
 
 
 _FILE_REF_RE = re.compile(r'\[\[(?:File|Image):([^|\]]+)(\|[^\]]*)?(\]\])', re.IGNORECASE)
-_IMAGE_PLACEHOLDER_RE = re.compile(r'\{\{COMMONS_IMAGE:([^|}]*?)(?:\|([^}]*))?\}\}', re.IGNORECASE)
-MAX_PLACEHOLDER_IMAGES = 3
+# {{GEN_IMAGE:scene|caption}} marks where the model wants an illustration.
+# COMMONS_IMAGE is the placeholder older prompts asked for; treat it the same.
+_IMAGE_PLACEHOLDER_RE = re.compile(r'\{\{\s*(?:GEN_IMAGE|COMMONS_IMAGE)\s*:([^|}]*?)(?:\|([^}]*))?\}\}', re.IGNORECASE)
+_HEADING_RE = re.compile(r'^(==+)\s*(.*?)\s*==+\s*$')
+MAX_EDIT_IMAGES = 3
+IMAGE_GEN_NOT_CONFIGURED = ('Image generation isn\'t configured: add a fal.ai key to this '
+                            'connection (Connections → Edit)')
+
+SCENE_RULES = (
+    'Describe what the picture shows in 1-3 sentences: the subject, setting, key details '
+    'and composition, drawn from what the text says. Do not mention art style, medium, '
+    'colours or lighting (the wiki\'s house style is added automatically), and do not ask '
+    'for text, labels or logos.'
+)
 
 
-def _shorten_queries(query: str) -> list[str]:
-    """Return a list of progressively shorter variants of a search query.
-
-    Bing Image Search indexes less content than bing.com; dropping trailing words
-    often finds results when the exact phrase has no indexed images.
-    e.g. "DARPA N3 Programme" → ["DARPA N3 Programme", "DARPA N3", "DARPA"]
-    Always includes at least the original query.
-    """
-    words = query.split()
-    queries = [query]
-    while len(words) > 1:
-        words = words[:-1]
-        shorter = ' '.join(words)
-        if shorter not in queries:
-            queries.append(shorter)
-    return queries
+def _clean_caption(caption: str) -> str:
+    """A caption safe to put last in [[File:...|thumb|right|caption]] (a "|" would start a new option)."""
+    return re.sub(r'\s+', ' ', caption.replace('|', ' - ').replace('[[File:', '').replace(']]', '')).strip()
 
 
-
-
+def _section_at(content: str, pos: int) -> str:
+    """Name of the == section == containing character offset `pos` ('Lead' before any heading)."""
+    name = 'Lead'
+    for line in content[:pos].split('\n'):
+        m = _HEADING_RE.match(line.strip())
+        if m:
+            name = m.group(2).strip()
+    return name
 
 
 def _insert_image(content: str, filename: str, caption: str, placement: str) -> str:
@@ -292,9 +298,8 @@ def _split_sections(content: str) -> list[dict]:
     lines = content.split('\n')
     sections: list[dict] = []
     current = {'name': 'Lead', 'placement': 'after_lead', 'lines': []}
-    heading_re = re.compile(r'^(==+)\s*(.*?)\s*==+\s*$')
     for line in lines:
-        m = heading_re.match(line.strip())
+        m = _HEADING_RE.match(line.strip())
         if m:
             sections.append(current)
             name = m.group(2).strip()
@@ -324,8 +329,15 @@ class WikiAgent:
     def __init__(self, wiki: WikiClient, anthropic_client, system_prompt: str,
                  connection_id: str, site_index: dict | None = None,
                  context_pages: list | None = None, uploads_dir=None,
-                 recent_pages: dict | None = None):
+                 recent_pages: dict | None = None,
+                 image_generator: 'image_gen.FalImageGenerator | None' = None,
+                 style_store=None):
         self.wiki = wiki
+        # None when the connection has no fal.ai key: pages are written without images.
+        self.image_gen = image_generator
+        # Reads/saves the connection's house style (get() -> str, set(style) -> str),
+        # so a style drafted here is shared by every later image on this wiki.
+        self._style_store = style_store
         self.ai = anthropic_client
         self.connection_id = connection_id
         self.cancel_event = threading.Event()
@@ -549,6 +561,30 @@ class WikiAgent:
 
     # ── PHASE 2: PER-STEP CONTENT GENERATION ─────────────────────────────────
 
+    def _image_instructions(self, new_page: bool) -> str:
+        """Prompt text telling the content model where and how to ask for illustrations."""
+        count = (self.image_gen.images_per_page if new_page else MAX_EDIT_IMAGES) if self.image_gen else 0
+        if not count:
+            if new_page:
+                return 'Do not add images or [[File:...]] references.'
+            return 'Do not add new images or [[File:...]] references; keep the existing ones.'
+        placeholder = (
+            'Mark each illustration with a {{GEN_IMAGE:scene|caption}} placeholder on its own line, '
+            'directly under a section heading (or after the lead paragraph); an AI image generator '
+            'paints each one in the wiki\'s house style.\n'
+            f'- scene: {SCENE_RULES} Never use "|" or "}}}}" inside the scene.\n'
+            '- caption: a short caption for readers.\n'
+            'Example: {{GEN_IMAGE:A cluttered Victorian laboratory bench with glass vacuum tubes and '
+            'coiled copper wire, a tall Tesla coil in the background|Early experimental apparatus}}\n'
+            'Do NOT use [[File:...]] with invented filenames.'
+        )
+        if new_page:
+            low = min(2, count)
+            amount = f'{low}-{count}' if low < count else str(count)
+            return f'Illustrations: include {amount} images, placed where they help the reader most. ' + placeholder
+        return ('Illustrations: keep existing [[File:...]] images. Only if the instruction asks for images, '
+                f'or you add a section that clearly needs one, add up to {count} new images. ' + placeholder)
+
     def _generate_page_content(self, title: str, instructions: str) -> dict:
         prompt = (
             f'Generate a complete wiki page for: **{title}**\n\n'
@@ -558,39 +594,39 @@ class WikiAgent:
             '- == Section == headings\n'
             '- [[wikilinks]] to related topics\n'
             '- [[Category:...]] tags at the end\n\n'
-            'For images: use {{COMMONS_IMAGE:search terms|caption text}} placeholders where '
-            '"search terms" describes what image you want from Wikimedia Commons '
-            '(e.g. {{COMMONS_IMAGE:ancient Roman amphitheater ruins|Roman amphitheater}}). '
-            'The system will search Commons and pick the best matching file for each. '
-            'Use up to 3 images. Do NOT use [[File:...]] with invented filenames.'
+            + self._image_instructions(new_page=True)
         )
         t0 = time.monotonic()
         content = self._call_ai(prompt)
         t1 = time.monotonic()
-        content = self._resolve_image_placeholders(content)
+        content, images, notice = self._resolve_image_placeholders(
+            title, content, self.image_gen.images_per_page if self.image_gen else 0)
         t2 = time.monotonic()
-        content = self._fix_broken_image_refs(content)
+        content = self._strip_invented_image_refs(content)
         t3 = time.monotonic()
-        log.info('Generated "%s": text %.0fs (%d chars), image placeholders %.0fs, image refs %.0fs',
-                 title, t1 - t0, len(content), t2 - t1, t3 - t2)
+        log.info('Generated "%s": text %.0fs (%d chars), %d images %.0fs, image refs %.0fs',
+                 title, t1 - t0, len(content), len(images), t2 - t1, t3 - t2)
         return {
             'content': content,
             'summary': f'Create: {title}',
+            'images': images,
+            'notice': notice,
         }
 
-    def _edit_page_content(self, title: str, current_content: str, instructions: str) -> str:
+    def _edit_page_content(self, title: str, current_content: str, instructions: str) -> dict:
         prompt = (
             f'Current content of [[{title}]]:\n\n{current_content}\n\n'
             f'Instruction: {instructions}\n\n'
             'Return the complete revised MediaWiki wikitext only (no JSON, no explanation).\n\n'
-            'For any new images: use {{COMMONS_IMAGE:search terms|caption text}} placeholders '
-            '(e.g. {{COMMONS_IMAGE:ancient Roman amphitheater ruins|Roman amphitheater}}). '
-            'The system will search Wikimedia Commons and pick the best matching file for each. '
-            'Use up to 3 new images. Do NOT use [[File:...]] with invented filenames.'
+            + self._image_instructions(new_page=False)
         )
         new_content = self._call_ai(prompt)
-        new_content = self._resolve_image_placeholders(new_content)
-        return self._fix_broken_image_refs(new_content)
+        new_content, images, notice = self._resolve_image_placeholders(title, new_content, MAX_EDIT_IMAGES)
+        return {
+            'content': self._strip_invented_image_refs(new_content, current_content),
+            'images': images,
+            'notice': notice,
+        }
 
     def _execute_find_replace_step(self, step: OperationStep) -> dict:
         # Extract pairs from step description via AI
@@ -666,336 +702,217 @@ class WikiAgent:
                 written += 1
         return {'success': True, 'pages_written': written}
 
-    def _prepare_add_image_content(self, step: OperationStep) -> None:
-        """Populate step.content/diff/images without writing to wiki. Raises on failure.
+    # ── IMAGES ────────────────────────────────────────────────────────────────
 
-        Section-aware: analyses the page's sections and adds 2–3 images, one per
-        chosen section, skipping sections that already contain an image. Gracefully
-        degrades to fewer images if some searches fail. All AI calls use Haiku
-        (filenames/text only — no image pixel analysis) to keep cost down.
+    def draft_image_style(self) -> str:
+        """Ask the model for a house image style that fits this wiki (see image_gen)."""
+        return self._call_ai(image_gen.STYLE_GUIDE_PROMPT, max_tokens=1000).strip().strip('"').strip()
+
+    def _house_style(self) -> str:
+        """The connection's image style guide, drafting and saving one if it has none yet."""
+        gen = self.image_gen
+        if gen.style:
+            return gen.style
+        with image_gen.style_lock(self.connection_id):
+            saved = self._style_store.get() if self._style_store else ''
+            if not saved:
+                drafted = self.draft_image_style()
+                saved = self._style_store.set(drafted) if self._style_store else drafted
+                log.info('Drafted image style for connection %s: %s', self.connection_id, saved)
+            gen.style = saved
+        return gen.style
+
+    def _generate_images(self, title: str, items: list[dict]) -> tuple[list, list[str]]:
+        """Generate one image per {scene, caption, section} item, in parallel.
+
+        Returns (results, errors): results line up with items, holding
+        {filename, caption, section, prompt} or None where generation failed.
         """
+        if not items:
+            return [], []
+        try:
+            style = self._house_style()
+        except Exception as e:
+            log.exception('Could not draft an image style for "%s"', title)
+            return [None] * len(items), [f'could not draft the house style: {e}']
+
+        def one(item):
+            prompt = image_gen.build_prompt(item['scene'], style)
+            data, content_type = self.image_gen.generate(prompt)
+            filename = image_gen.save_generated(data, content_type, title, item['caption'], {
+                'scene': item['scene'], 'prompt': prompt, 'model': self.image_gen.model,
+            })
+            return {'filename': filename, 'caption': item['caption'],
+                    'section': item['section'], 'prompt': prompt}
+
+        results, errors = [], []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            for future in [pool.submit(one, item) for item in items]:
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    log.warning('Image generation failed for "%s": %s', title, e)
+                    results.append(None)
+                    errors.append(str(e))
+        return results, errors
+
+    @staticmethod
+    def _image_notice(errors: list[str], total: int) -> Optional[str]:
+        if not errors:
+            return None
+        reasons = '; '.join(dict.fromkeys(errors))
+        return f'{len(errors)} of {total} images failed: {reasons}'
+
+    def _resolve_image_placeholders(self, title: str, content: str,
+                                    limit: int) -> tuple[str, list[dict], Optional[str]]:
+        """Replace {{GEN_IMAGE:scene|caption}} placeholders with generated images.
+
+        The first `limit` distinct scenes are generated; the rest, repeats and any
+        that fail are removed. Returns (content, images, notice).
+        """
+        matches = list(_IMAGE_PLACEHOLDER_RE.finditer(content))
+        if not matches:
+            return content, [], None
+        if not self.image_gen or limit <= 0:
+            return _IMAGE_PLACEHOLDER_RE.sub('', content), [], None
+
+        items = []
+        for m in matches:
+            scene = m.group(1).strip()
+            if scene and len(items) < limit and scene not in {i['scene'] for i in items}:
+                items.append({'scene': scene, 'caption': _clean_caption(m.group(2) or '') or title,
+                              'section': _section_at(content, m.start())})
+        results, errors = self._generate_images(title, items)
+        by_scene = {item['scene']: img for item, img in zip(items, results) if img}
+
+        used: set[str] = set()
+
+        def apply(m):
+            scene = m.group(1).strip()
+            img = by_scene.get(scene)
+            if not img or scene in used:
+                return ''
+            used.add(scene)
+            return f'[[File:{img["filename"]}|thumb|right|{img["caption"]}]]'
+
+        images = [img for img in results if img]
+        return _IMAGE_PLACEHOLDER_RE.sub(apply, content), images, self._image_notice(errors, len(items))
+
+    def illustrate(self, title: str, content: str, hint: str = '', count: int = 3) -> dict:
+        """Add up to `count` generated images to sections of `content` that have none.
+
+        The model picks the sections and writes a scene for each. Returns
+        {content, images, notice}; raises if no image could be added.
+        """
+        if not self.image_gen:
+            raise ValueError(IMAGE_GEN_NOT_CONFIGURED)
+        sections = [s for s in _split_sections(content) if not s['has_image']]
+        if not sections:
+            raise ValueError(f'Every section of "{title}" already has an image')
+
+        chosen = self._select_image_sections(title, sections, hint, count)
+        if not chosen:
+            raise ValueError(f'No suitable section found for an image on "{title}"')
+
+        items = [{'scene': c['prompt'], 'caption': c['caption'], 'section': c['section']} for c in chosen]
+        results, errors = self._generate_images(title, items)
+
+        placement_by_name = {s['name']: s['placement'] for s in sections}
+        new_content = content
+        images = []
+        for item, img in zip(items, results):
+            if img:
+                new_content = _insert_image(new_content, img['filename'], img['caption'],
+                                            placement_by_name.get(item['section'], 'after_lead'))
+                images.append(img)
+        if not images:
+            raise ValueError('Image generation failed: ' + '; '.join(dict.fromkeys(errors)))
+        return {'content': new_content, 'images': images,
+                'notice': self._image_notice(errors, len(items))}
+
+    def _prepare_add_image_content(self, step: OperationStep) -> None:
+        """Populate step.content/diff/images without writing to wiki. Raises on failure."""
         page = self.wiki.get_page(step.title)
         if not page.get('exists') or not page.get('content'):
             raise ValueError(f'Page "{step.title}" not found or empty')
         content = page['content']
+        result = self.illustrate(step.title, content, hint=step.description)
 
-        # Repair broken image references before analyzing sections.
-        content = self._fix_broken_image_refs(content)
-
-        # Candidate sections = those that don't already have an image.
-        sections = [s for s in _split_sections(content) if not s['has_image']]
-        if not sections:
-            raise ValueError(f'Every section of "{step.title}" already has an image')
-
-        chosen_sections = self._select_image_sections(step, sections)
-        if not chosen_sections:
-            raise ValueError(f'No suitable section found for an image on "{step.title}"')
-
-        # Find and upload images for each chosen section.
-        placement_by_name = {s['name']: s['placement'] for s in sections}
-        candidates = []  # [{name, placement, caption, results}]
-        for i, entry in enumerate(chosen_sections):
-            name = entry.get('section', '').strip()
-            caption = (entry.get('caption') or name or step.title).strip()
-            placement = placement_by_name.get(name, 'after_lead')
-
-            # First image: title only for broad relevance.
-            # Remaining images: title + section name for specificity.
-            query = step.title if i == 0 else f'{step.title} {name}'
-
-            # Primary: Bing Image Search → download → upload.
-            # Retry with progressively shorter queries; API errors (quota, key)
-            # are caught here so Wikipedia always gets a chance as fallback.
-            bing_results = []
-            bing_error = ''
-            for attempt_query in _shorten_queries(query):
-                try:
-                    bing_results = self._search_bing_images(attempt_query, limit=3)
-                except ValueError as exc:
-                    bing_error = str(exc)
-                    break  # API error won't change per query — stop retrying
-                if bing_results:
-                    break
-            if bing_results:
-                img = bing_results[0]
-                uploaded = self._download_and_upload_image(
-                    img['url'], name, caption, img.get('source_page_url', ''))
-                if uploaded:
-                    candidates.append({'name': name, 'placement': placement,
-                                       'caption': caption, 'results': [uploaded]})
-                    continue
-
-            # Fallback: Wikipedia article images (on Commons, no key needed)
-            try:
-                wp_results = WikiClient.search_wikipedia_images(step.title, limit=5)
-            except Exception:
-                wp_results = []
-            if wp_results:
-                candidates.append({'name': name, 'placement': placement,
-                                   'caption': caption, 'results': wp_results})
-            elif bing_error:
-                raise ValueError(bing_error)
-
-        if not candidates:
-            raise ValueError(f'No images found for "{step.title}" (tried Bing and Wikipedia)')
-
-        picks = self._pick_best_images(candidates)
-
-        # Insert sequentially, deduping filenames across sections.
-        new_content = content
-        used: set[str] = set()
-        images: list[dict] = []
-        for cand, idx in zip(candidates, picks):
-            results = cand['results']
-            idx = max(0, min(idx, len(results) - 1))
-            chosen = results[idx]
-            # Skip a duplicate; fall back to the first unused result in this section.
-            if chosen['filename'] in used:
-                chosen = next((r for r in results if r['filename'] not in used), None)
-                if not chosen:
-                    continue
-            used.add(chosen['filename'])
-            new_content = _insert_image(new_content, chosen['filename'], cand['caption'], cand['placement'])
-            images.append({
-                'filename': chosen['filename'],
-                'commons_url': chosen['commons_url'],
-                'caption': cand['caption'],
-                'section': cand['name'],
-            })
-
-        if not images:
-            raise ValueError(f'No images found for "{step.title}" (tried Bing and Wikipedia)')
-
-        step.content = new_content
+        step.content = result['content']
         step.old_content = content
-        step.diff = _make_diff(content, new_content)
-        step.images = images
-        step.image_file = images[0]['filename']
-        step.commons_url = images[0]['commons_url']
+        step.diff = _make_diff(content, result['content'])
+        step.images = result['images']
+        step.image_file = result['images'][0]['filename']
+        step.commons_url = None
+        step.notice = result['notice']
 
-    def _select_image_sections(self, step: OperationStep, sections: list[dict]) -> list[dict]:
-        """Haiku call: choose 2–3 sections to illustrate, with a query + caption each."""
+    def _select_image_sections(self, title: str, sections: list[dict],
+                               hint: str = '', count: int = 3) -> list[dict]:
+        """Choose up to `count` sections to illustrate, with a scene and caption for each."""
         section_blocks = '\n\n'.join(
-            f'- Section: {s["name"]}\n  Content: {s["text"][:400]}' for s in sections
+            f'- Section: {s["name"]}\n  Content: {s["text"][:800]}' for s in sections
         )
-        context_hint = f'\n\nUser request context: {step.description[:300]}' if step.description else ''
+        hint_text = f'\n\nGuidance from the user: {hint[:500]}' if hint else ''
+        low = min(2, count, len(sections))
         prompt = (
-            f'You are choosing where to add images to the wiki page "{step.title}".\n\n'
-            f'These are the sections that do NOT yet have an image:\n\n{section_blocks}{context_hint}\n\n'
-            'Choose 2 to 3 of these sections that would benefit from an illustrative image. '
-            'Prioritize breadth and coverage. For each chosen section provide a short, '
-            'descriptive caption for the image.\n\n'
+            f'You are choosing where to add illustrations to the wiki page "{title}".\n\n'
+            f'These are the sections that do NOT yet have an image:\n\n{section_blocks}{hint_text}\n\n'
+            f'Choose {low}-{count} of these sections that would benefit most from an illustration, '
+            'favouring breadth across the article. For each, write:\n'
+            f'- "prompt": {SCENE_RULES}\n'
+            '- "caption": a short caption for readers.\n\n'
             'Return ONLY JSON: '
-            '{"images": [{"section": "<exact section name>", "caption": "caption text"}]}'
+            '{"images": [{"section": "<exact section name>", "prompt": "...", "caption": "..."}]}'
         )
+        valid_names = {s['name'] for s in sections}
         try:
-            data = _extract_json(self._call_ai(prompt, model='claude-haiku-4-5-20251001'))
+            data = _extract_json(self._call_ai(prompt, max_tokens=4000))
             picks = data.get('images', []) if isinstance(data, dict) else data
-            valid_names = {s['name'] for s in sections}
-            picks = [p for p in picks if isinstance(p, dict) and p.get('section') in valid_names]
-            return picks[:3]
-        except Exception:
-            # Fall back to picking 2-3 sections by position when Haiku fails.
-            return [{'section': s['name'], 'caption': s['name']} for s in sections[:3]]
-
-    def _resolve_image_placeholders(self, content: str) -> str:
-        """Replace {{COMMONS_IMAGE:query|caption}} placeholders with real Commons file refs.
-
-        Caps to the first MAX_PLACEHOLDER_IMAGES unique queries and uses the same Haiku
-        best-of-candidates picker as the add_image step (rather than blindly taking the
-        top Commons hit). Placeholders over the cap or with no results are removed.
-        """
-        matches = list(_IMAGE_PLACEHOLDER_RE.finditer(content))
-        if not matches:
-            return content
-
-        # Ordered unique queries, capped.
-        kept_queries: list[str] = []
-        for m in matches:
-            query = m.group(1).strip()
-            if query and query not in kept_queries:
-                kept_queries.append(query)
-        kept_queries = kept_queries[:MAX_PLACEHOLDER_IMAGES]
-
-        # Find and upload an image for each placeholder query.
-        candidates = []  # [{name: query, results}]
-        for query in kept_queries:
-            # Primary: Bing Image Search → download → upload (with query shortening retry)
-            bing_results = []
-            for attempt_query in _shorten_queries(query):
-                try:
-                    bing_results = self._search_bing_images(attempt_query, limit=3)
-                except ValueError:
-                    break  # API error — skip to Wikipedia fallback
-                if bing_results:
-                    break
-            if bing_results:
-                img = bing_results[0]
-                uploaded = self._download_and_upload_image(
-                    img['url'], query, query, img.get('source_page_url', ''))
-                if uploaded:
-                    candidates.append({'name': query, 'results': [uploaded]})
+            chosen, seen = [], set()
+            for p in picks:
+                if not isinstance(p, dict) or p.get('section') not in valid_names or p['section'] in seen:
                     continue
-            # Fallback: Wikipedia article images
-            try:
-                wp_results = WikiClient.search_wikipedia_images(query, limit=5)
-            except Exception:
-                wp_results = []
-            if wp_results:
-                candidates.append({'name': query, 'results': wp_results})
-
-        picks = self._pick_best_images(candidates)
-        chosen: dict[str, str] = {}
-        for cand, idx in zip(candidates, picks):
-            results = cand['results']
-            idx = max(0, min(idx, len(results) - 1))
-            chosen[cand['name']] = results[idx]['filename']
-
-        def apply(m):
-            query = m.group(1).strip()
-            caption = (m.group(2) or query).strip()
-            filename = chosen.get(query)
-            if not filename:
-                return ''
-            return f'[[File:{filename}|thumb|right|{caption}]]'
-
-        return _IMAGE_PLACEHOLDER_RE.sub(apply, content)
-
-    def _pick_best_images(self, candidates: list[dict]) -> list[int]:
-        """Haiku call: pick the best result index (0-based) per candidate group from filenames.
-
-        Each candidate is {name, results}; returns one chosen index per candidate.
-        """
-        if not candidates:
-            return []
-        blocks = []
-        for i, cand in enumerate(candidates):
-            files = '\n'.join(f'    {j + 1}. {r["filename"]}' for j, r in enumerate(cand['results']))
-            blocks.append(f'Option group {i + 1} ("{cand["name"]}") candidates:\n{files}')
-        prompt = (
-            'For each option group below, pick the most relevant image by its number, '
-            'based on the filenames.\n\n' + '\n\n'.join(blocks) + '\n\n'
-            'Return ONLY JSON mapping group number to chosen image number, e.g. '
-            '{"picks": {"1": 2, "2": 1}}'
-        )
-        try:
-            data = _extract_json(self._call_ai(prompt, model='claude-haiku-4-5-20251001'))
-            raw = data.get('picks', {}) if isinstance(data, dict) else {}
-            return [max(0, int(raw.get(str(i + 1), 1)) - 1) for i in range(len(candidates))]
+                if not (p.get('prompt') or '').strip():
+                    continue
+                seen.add(p['section'])
+                chosen.append({'section': p['section'], 'prompt': p['prompt'].strip(),
+                               'caption': _clean_caption(p.get('caption') or '') or p['section']})
+            return chosen[:count]
         except Exception:
-            return [0] * len(candidates)
+            log.warning('Image section selection failed for "%s"; using the first sections', title)
+            return [{'section': s['name'], 'caption': s['name'],
+                     'prompt': f'An illustration of {s["name"]} in the context of {title}'}
+                    for s in sections[:count]]
 
-    def _search_bing_images(self, query: str, limit: int = 5) -> list[dict]:
-        """Search Bing Image Search API for images.
+    def _strip_invented_image_refs(self, content: str, old_content: str = '') -> str:
+        """Remove [[File:...]] refs the AI added that point at files that don't exist.
 
-        Returns [{url, source_page_url, title}] or [] if unconfigured or no results.
-        Raises ValueError with the API error on authentication/quota failures.
-        Requires BING_API_KEY environment variable.
+        Refs already present in `old_content` and our own generated images are
+        left alone; the rest are checked against this wiki and Commons.
         """
-        api_key = os.environ.get('BING_API_KEY', '')
-        if not api_key:
-            return []
-        try:
-            r = requests.get('https://api.bing.microsoft.com/v7.0/images/search', params={
-                'q': query,
-                'count': min(limit, 10),
-                'safeSearch': 'Moderate',
-            }, headers={'Ocp-Apim-Subscription-Key': api_key}, timeout=10)
-            if not r.ok:
-                err = r.json().get('error', {}).get('message', r.text[:200])
-                raise ValueError(f'Bing API error {r.status_code}: {err}')
-            return [
-                {
-                    'url': item['contentUrl'],
-                    'source_page_url': item.get('hostPageUrl', ''),
-                    'title': item.get('name', ''),
-                }
-                for item in r.json().get('value', []) if item.get('contentUrl')
-            ]
-        except ValueError:
-            raise
-        except Exception:
-            return []
-
-    def _fix_broken_image_refs(self, content: str) -> str:
-        """Repair broken [[File:...]] references that don't exist locally or on Commons.
-
-        For each missing file: tries Commons search, then web search + upload fallback.
-        Preserves file options and removes refs if no replacement found.
-        """
-        matches = list(_FILE_REF_RE.finditer(content))
-        if not matches:
+        kept = {image_gen.canonical_filename(m.group(1)) for m in _FILE_REF_RE.finditer(old_content or '')}
+        names = list(dict.fromkeys(
+            m.group(1).strip() for m in _FILE_REF_RE.finditer(content)
+            if image_gen.canonical_filename(m.group(1)) not in kept and not image_gen.find_generated(m.group(1))
+        ))
+        if not names:
             return content
-        filenames = [m.group(1).strip() for m in matches]
         try:
-            local_ok = self.wiki.check_local_files_exist(filenames)
-            commons_ok = WikiClient.check_commons_files_exist(filenames)
-            existing = local_ok | commons_ok
+            found = self.wiki.check_local_files_exist(names) | WikiClient.check_commons_files_exist(names)
         except Exception:
             return content
+        existing = {image_gen.canonical_filename(n) for n in found}
+        missing = {image_gen.canonical_filename(n) for n in names} - existing
+        if not missing:
+            return content
+        log.info('Removing invented image refs: %s', ', '.join(sorted(missing)))
+        return _FILE_REF_RE.sub(
+            lambda m: '' if image_gen.canonical_filename(m.group(1)) in missing else m.group(0), content)
 
-        replacements = {}
-        for m in matches:
-            filename = m.group(1).strip()
-            if filename in existing or filename in replacements:
-                continue
-            query = re.sub(r'\.[^.]+$', '', filename).replace('_', ' ').replace('-', ' ')
-            replacement = None
-
-            try:
-                results = self.wiki.search_commons_images(query, limit=3)
-                if results:
-                    replacement = results[0]['filename']
-            except Exception:
-                pass
-
-            if not replacement:
-                bing_results = self._search_bing_images(query, limit=2)
-                for g_img in bing_results:
-                    uploaded = self._download_and_upload_image(
-                        g_img['url'], query, query, g_img.get('source_page_url', ''))
-                    if uploaded:
-                        replacement = uploaded['filename']
-                        break
-
-            replacements[filename] = replacement
-
-        def apply_replacement(m):
-            filename = m.group(1).strip()
-            options = m.group(2) or ''
-            closing = m.group(3)
-            if filename in existing:
-                return m.group(0)
-            sub = replacements.get(filename)
-            return f'[[File:{sub}{options}{closing}' if sub else ''
-
-        return _FILE_REF_RE.sub(apply_replacement, content)
-
-    def _download_and_upload_image(self, url: str, section_name: str, caption: str,
-                                   source_page_url: str = '') -> Optional[dict]:
-        """Download image from URL and upload to wiki. Returns {filename, commons_url} or None on failure."""
-        try:
-            resp = requests.get(url, timeout=10, headers={'User-Agent': 'WikiGen/1.0'})
-            resp.raise_for_status()
-            mime_type = resp.headers.get('content-type', 'image/jpeg').split(';')[0]
-            if not mime_type.startswith('image/'):
-                return None
-
-            ext_match = re.search(r'\.(jpe?g|png|gif|webp|svg)(?:[?#]|$)', url, re.IGNORECASE)
-            ext = ext_match.group(1).lower() if ext_match else 'jpg'
-            if ext == 'jpeg':
-                ext = 'jpg'
-            safe_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', (caption or section_name)[:40])
-            filename = f"{safe_name}_{uuid.uuid4().hex[:8]}.{ext}"
-            source_attr = source_page_url or url
-            description = f"{caption or section_name}.\nSource: {source_attr}"
-
-            result = self.wiki.upload_file(filename, resp.content, mime_type, description)
-            if result.get('success'):
-                return {'filename': filename, 'commons_url': url, 'title': caption}
-        except Exception:
-            pass
-        return None
+    def _write_page(self, title: str, content: str, summary: str) -> dict:
+        """Upload any generated images the content uses, then write the page."""
+        image_gen.upload_generated_refs(self.wiki, content)
+        return self.wiki.write_page(title, content, summary)
 
     def _execute_add_image_step(self, step: OperationStep) -> dict:
         if not step.content:
@@ -1005,7 +922,7 @@ class WikiAgent:
             summary = f'Add {len(files)} images: ' + ', '.join(files)
         else:
             summary = f'Add image: {files[0] if files else ""}'
-        return self.wiki.write_page(step.title, step.content, summary)
+        return self._write_page(step.title, step.content, summary)
 
     def _execute_upload_file_step(self, step: OperationStep) -> dict:
         filename = step.title.removeprefix('File:')
@@ -1045,21 +962,32 @@ class WikiAgent:
 
         return {'success': False, 'error': 'No attached file or source URL for this upload — re-attach the document and try again'}
 
+    def _fill_create_step(self, step: OperationStep, instruction: str) -> None:
+        data = self._generate_page_content(step.title, instruction)
+        step.content = data['content']
+        step.summary = data['summary']
+        step.images = data['images']
+        step.notice = data['notice']
+        step.links_to = self.wiki.extract_links_from_content(step.content)
+
+    def _fill_edit_step(self, step: OperationStep, instruction: str) -> None:
+        page = self.wiki.get_page(step.title)
+        if not page.get('exists'):
+            raise ValueError(f'Page "{step.title}" does not exist')
+        step.old_content = page['content']
+        data = self._edit_page_content(step.title, step.old_content, instruction)
+        step.content = data['content']
+        step.images = data['images']
+        step.notice = data['notice']
+        step.diff = _make_diff(step.old_content, step.content)
+
     def generate_step_preview(self, step: OperationStep) -> None:
         """Populate step.content (and diff/summary) without writing to wiki. Raises on failure."""
         instruction = step.description or step.summary
         if step.type in ('create', 'write'):
-            data = self._generate_page_content(step.title, instruction)
-            step.content = data['content']
-            step.summary = data['summary']
-            step.links_to = self.wiki.extract_links_from_content(step.content)
+            self._fill_create_step(step, instruction)
         elif step.type == 'edit':
-            page = self.wiki.get_page(step.title)
-            if not page.get('exists'):
-                raise ValueError(f'Page "{step.title}" does not exist')
-            step.old_content = page['content']
-            step.content = self._edit_page_content(step.title, step.old_content, instruction)
-            step.diff = _make_diff(step.old_content, step.content)
+            self._fill_edit_step(step, instruction)
             step.summary = step.summary or f'Edit: {step.title}'
         elif step.type == 'add_image':
             self._prepare_add_image_content(step)
@@ -1078,25 +1006,17 @@ class WikiAgent:
 
             if step.type in ('create', 'write'):
                 if not step.content:
-                    data = self._generate_page_content(step.title, instruction)
-                    step.content = data['content']
-                    step.summary = data['summary']
-                    step.links_to = self.wiki.extract_links_from_content(step.content)
-                result = self.wiki.write_page(step.title, step.content, step.summary or f'Create: {step.title}')
+                    self._fill_create_step(step, instruction)
+                result = self._write_page(step.title, step.content, step.summary or f'Create: {step.title}')
 
             elif step.type == 'edit':
                 if not step.content:
-                    page = self.wiki.get_page(step.title)
-                    if not page.get('exists'):
-                        raise ValueError(f'Page "{step.title}" does not exist')
-                    step.old_content = page['content']
-                    step.content = self._edit_page_content(step.title, page['content'], instruction)
-                    step.diff = _make_diff(step.old_content, step.content)
+                    self._fill_edit_step(step, instruction)
                 step.summary = step.summary or f'Edit: {step.title}'
-                result = self.wiki.write_page(step.title, step.content, step.summary)
+                result = self._write_page(step.title, step.content, step.summary)
 
             elif step.type in ('replace',):
-                result = self.wiki.write_page(step.title, step.content, step.summary)
+                result = self._write_page(step.title, step.content, step.summary)
 
             elif step.type == 'find_replace':
                 result = self._execute_find_replace_step(step)
@@ -1111,10 +1031,7 @@ class WikiAgent:
                 )
 
             elif step.type == 'add_image':
-                if step.content:
-                    result = self.wiki.write_page(step.title, step.content, step.summary)
-                else:
-                    result = self._execute_add_image_step(step)
+                result = self._execute_add_image_step(step)
 
             elif step.type == 'ensure_disambig':
                 result = self._execute_ensure_disambig_step(step)
@@ -1240,7 +1157,7 @@ class WikiAgent:
         step.status = 'executing'
         try:
             if step.type in ('write', 'edit', 'replace', 'add_image', 'create'):
-                result = self.wiki.write_page(step.title, step.content, step.summary)
+                result = self._write_page(step.title, step.content, step.summary)
             elif step.type == 'move':
                 result = self.wiki.move_page(step.from_title, step.title, step.summary)
             elif step.type == 'delete':
