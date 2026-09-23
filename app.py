@@ -1018,6 +1018,19 @@ def agent_execute_stream(plan_id: str):
     )
 
 
+@app.route('/api/debug/threads')
+def debug_threads():
+    """Plain-text stack of every thread, to see where a stuck request is waiting."""
+    import sys
+    import traceback
+    names = {t.ident: t.name for t in threading.enumerate()}
+    out = []
+    for ident, frame in sys._current_frames().items():
+        out.append(f'--- {names.get(ident, "?")} ({ident}) ---')
+        out.append(''.join(traceback.format_stack(frame)))
+    return Response('\n'.join(out), mimetype='text/plain')
+
+
 @app.route('/api/history')
 def get_history():
     if not HISTORY_FILE.exists():
