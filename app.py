@@ -194,6 +194,37 @@ def _sse(data: dict) -> str:
     return f'data: {json.dumps(data)}\n\n'
 
 
+def _json_with_keepalive(work) -> Response:
+    """Run a slow `work()` (returning a JSON-able dict) without the browser giving up.
+
+    Browsers abort a request that receives no bytes for ~5 minutes, and long AI
+    generations can exceed that. Stream a space every 10s while `work` runs, then
+    the JSON body; leading whitespace is valid JSON, so `resp.json()` still works.
+    Errors are reported in the body, since the 200 status is already sent.
+    """
+    result: dict = {}
+
+    def run():
+        try:
+            result['data'] = work()
+        except Exception as e:
+            result['data'] = {'success': False, 'error': str(e)}
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+
+    def generate():
+        yield ' '
+        while worker.is_alive():
+            worker.join(timeout=10)
+            if worker.is_alive():
+                yield ' '
+        yield json.dumps(result['data'])
+
+    return Response(generate(), mimetype='application/json',
+                    headers={'X-Accel-Buffering': 'no', 'Cache-Control': 'no-cache'})
+
+
 def _plan_from_disk(plan_id: str) -> OperationPlan | None:
     path = PLANS_DIR / f'{plan_id}.json'
     if not path.exists():
@@ -483,9 +514,12 @@ def wiki_rewrite():
 
     agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
                       site_index=index, recent_pages=site_index.get_recent_pages(conn['id']))
-    new_content = agent._edit_page_content(title, content, instruction)
-    diff = _make_diff(content, new_content)
-    return jsonify({'content': new_content, 'diff': diff})
+
+    def work():
+        new_content = agent._edit_page_content(title, content, instruction)
+        return {'content': new_content, 'diff': _make_diff(content, new_content)}
+
+    return _json_with_keepalive(work)
 
 
 # ─── DOCUMENT UPLOAD & URL FETCH ─────────────────────────────────────────────
@@ -806,13 +840,16 @@ def step_preview_route():
         client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
         site_index=index, recent_pages=site_index.get_recent_pages(conn['id']),
     )
-    try:
-        agent.generate_step_preview(step)
-        _plans[plan_id] = plan
-        _save_plan_to_disk(plan)
-        return jsonify({'success': True, 'step': step.to_dict()})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e), 'step': step.to_dict()})
+    def work():
+        try:
+            agent.generate_step_preview(step)
+            _plans[plan_id] = plan
+            _save_plan_to_disk(plan)
+            return {'success': True, 'step': step.to_dict()}
+        except Exception as e:
+            return {'success': False, 'error': str(e), 'step': step.to_dict()}
+
+    return _json_with_keepalive(work)
 
 
 @app.route('/api/agent/step/approve', methods=['POST'])
@@ -939,6 +976,8 @@ def execute_plan_route():
 @app.route('/api/agent/execute/stream/<plan_id>')
 def agent_execute_stream(plan_id: str):
     def generate():
+        yield ': connected\n\n'  # flush headers now; see agent_plan_stream
+
         exec_q = _exec_queues.get(plan_id)
         if not exec_q:
             yield _sse({'type': 'error', 'error': 'Execution not found'})
@@ -946,7 +985,7 @@ def agent_execute_stream(plan_id: str):
 
         while True:
             try:
-                event = exec_q.get(timeout=60)
+                event = exec_q.get(timeout=15)
             except queue.Empty:
                 yield ': keepalive\n\n'
                 continue
