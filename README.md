@@ -93,7 +93,7 @@ gunicorn -k gthread -w 1 --threads 8 --timeout 300 -b 0.0.0.0:5055 app:app
 
 ## Deploying on Synology (auto-updating)
 
-Every push to `main` builds a Docker image and publishes it to `ghcr.io/davior/wikigen` (`.github/workflows/docker-publish.yml`). On the NAS, [Watchtower](https://containrrr.dev/watchtower/) checks for a new image every 5 minutes and restarts WikiGen on it. After the one-time setup below, merging a PR is all it takes to deploy. The NAS needs no git access.
+Every push to `main` builds a Docker image and publishes it to `ghcr.io/davior/wikigen` (`.github/workflows/docker-publish.yml`). On the NAS, a [Watchtower](https://containrrr.dev/watchtower/) container picks up the new image and restarts WikiGen on it. Use the Watchtower you already run, or add one (below); run only one per Docker host, since a second unscoped instance shuts the first down. After the one-time setup, merging a PR is all it takes to deploy. The NAS needs no git access.
 
 Requires DSM 7.2+ with **Container Manager** on an x86 NAS.
 
@@ -106,19 +106,35 @@ Requires DSM 7.2+ with **Container Manager** on an x86 NAS.
 3. **Image access.** After the first workflow run, open the package on GitHub (profile → Packages → wikigen). Then either:
    - set its visibility to **Public** (the image contains no secrets; those stay in `.env`), or
    - keep it private: create a classic PAT with only `read:packages`, then on the NAS run
-     `docker login ghcr.io -u <github-user>` (paste the PAT) and copy `~/.docker/config.json` to `/volume1/docker/wikigen/config.json`. Uncomment the `config.json` mount in the compose file so Watchtower can pull too. Container Manager → Registry → Settings → Add also lets DSM pull it.
+     `docker login ghcr.io -u <github-user>` (paste the PAT) and copy `~/.docker/config.json` to `/volume1/docker/wikigen/config.json`. Mount it into your Watchtower container as `/config.json` so Watchtower can pull too. Container Manager → Registry → Settings → Add also lets DSM pull it.
 4. **Project.** Container Manager → Project → Create → path `/volume1/docker/wikigen` → *Create docker-compose.yml* → paste `deploy/docker-compose.yml` → Done.
 5. Browse to `http://<nas-ip>:5055`.
+6. **Watchtower.** If you already run one, nothing to do: WikiGen carries the `com.centurylinklabs.watchtower.enable=true` label, which also covers a Watchtower running with `--label-enable`. If you don't, add this service to the project (host networking avoids the same DNS problem):
+   ```yaml
+     watchtower:
+       image: containrrr/watchtower
+       container_name: watchtower
+       command: --label-enable --cleanup --schedule "0 0 17 * * *"
+       network_mode: host
+       volumes:
+         - /var/run/docker.sock:/var/run/docker.sock
+       restart: unless-stopped
+   ```
 
 **HTTPS (optional):** Control Panel → Login Portal → Advanced → Reverse Proxy. Map `https://wikigen.<your-domain>` to `http://localhost:5055`. Under *Custom Header*, add the WebSocket preset, and set a long proxy timeout so streaming plans aren't cut off.
 
 ### Day to day
 
-- **Update:** merge to `main`. The new version is live within ~5 minutes of the workflow finishing. Check Container Manager → Container → wikigen-watchtower → Log to watch it happen.
-- **Force update now:** Container Manager → Project → wikigen → Action → Build (re-pulls `latest`).
+- **Update:** merge to `main`, and your Watchtower installs the new image on its next check. How often that happens is set on your Watchtower, not here. An update restarts WikiGen, so a nightly schedule (e.g. `--schedule "0 0 17 * * *"`, 17:00 UTC) avoids restarts mid-session.
+- **Update now:** over SSH on the NAS, run a one-off check for just this container:
+  ```bash
+  sudo docker run --rm --network host -v /var/run/docker.sock:/var/run/docker.sock \
+    containrrr/watchtower --run-once --cleanup wikigen
+  ```
+  It pulls `latest` and recreates `wikigen` only if the image changed, keeping the container's settings. (For a private package add `-v /volume1/docker/wikigen/config.json:/config.json:ro`.)
 - **Roll back:** change the image to a specific build, e.g. `ghcr.io/davior/wikigen:sha-1a2b3c4` (tags are listed on the package page), and rebuild the project. Switch back to `:latest` to resume auto-updates.
 
-Updates restart the container, and in-flight plans that haven't been saved to `plans/` are lost, so avoid merging mid-run.
+Updates restart the container and kill any generation or execution in progress, so don't force an update mid-run.
 
 ### Troubleshooting
 

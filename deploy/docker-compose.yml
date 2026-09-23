@@ -17,15 +17,8 @@ services:
     volumes:
       - ./data:/data
     restart: unless-stopped
+    # Auto-updates come from the NAS's existing Watchtower (see README). This
+    # label opts WikiGen in if that Watchtower runs with --label-enable.
     labels:
       - com.centurylinklabs.watchtower.enable=true
 
-  watchtower:
-    image: containrrr/watchtower
-    container_name: wikigen-watchtower
-    command: --label-enable --cleanup --interval 300
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      # Uncomment if the GHCR package is private (see README):
-      # - ./config.json:/config.json:ro
-    restart: unless-stopped
