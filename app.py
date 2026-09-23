@@ -1,5 +1,6 @@
 import io
 import json
+import logging
 import mimetypes
 import os
 import queue
@@ -20,6 +21,7 @@ from agent import OperationPlan, OperationStep, WikiAgent, _make_diff
 from wiki_client import WikiClient
 
 load_dotenv()
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET', 'wikigen-dev-secret')
@@ -375,7 +377,8 @@ def check_connection():
     client = get_wiki_client(conn['id'])
     if client and client._connected:
         return jsonify({'connected': True, 'wiki_url': conn['wiki_url'], 'name': conn.get('name', '')})
-    return jsonify({'connected': False, 'error': 'Wiki connection failed'})
+    error = (client.last_error if client else None) or 'Wiki connection failed'
+    return jsonify({'connected': False, 'error': error})
 
 
 # ─── LEGACY PUBLISH ───────────────────────────────────────────────────────────

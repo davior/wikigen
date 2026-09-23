@@ -1,6 +1,21 @@
+import json
+import logging
 import re
 import time
 import requests
+
+log = logging.getLogger(__name__)
+
+
+def _short_reason(exc: Exception) -> str:
+    """Pull the innermost cause out of a requests/urllib3 exception chain."""
+    msg = str(exc)
+    for marker in ('Failed to resolve', 'Name or service not known', 'Temporary failure in name resolution',
+                   'Connection refused', 'No route to host', 'Network is unreachable',
+                   'CERTIFICATE_VERIFY_FAILED'):
+        if marker in msg:
+            return marker
+    return msg[:200]
 
 
 class WikiClient:
@@ -17,12 +32,21 @@ class WikiClient:
         self._csrf_token = None
         self._connected = False
         self._last_write_time = 0.0
+        self.last_error: str | None = None
 
     def connect(self) -> bool:
+        self.last_error = self._login()
+        self._connected = self.last_error is None
+        if self.last_error:
+            log.warning('Wiki connection to %s failed: %s', self._url, self.last_error)
+        return self._connected
+
+    def _login(self) -> str | None:
+        """Log in and fetch a CSRF token. Returns None on success, else a readable reason."""
         try:
             r = self._session.get(self._url, params={
                 'action': 'query', 'meta': 'tokens', 'type': 'login', 'format': 'json'
-            })
+            }, timeout=15)
             r.raise_for_status()
             login_token = r.json()['query']['tokens']['logintoken']
 
@@ -32,23 +56,35 @@ class WikiClient:
                 'lgpassword': self._password,
                 'lgtoken': login_token,
                 'format': 'json',
-            })
+            }, timeout=15)
             r2.raise_for_status()
-            result = r2.json()['login']['result']
-            if result != 'Success':
-                return False
+            login = r2.json()['login']
+            if login.get('result') != 'Success':
+                reason = login.get('reason')
+                if isinstance(reason, dict):
+                    reason = reason.get('text') or reason.get('code')
+                return f"Login failed: {login.get('result')}" + (f' — {reason}' if reason else '')
 
             self._csrf_token = self._fetch_csrf()
-            self._connected = bool(self._csrf_token)
-            return self._connected
-        except Exception:
-            return False
+            if not self._csrf_token:
+                return 'Logged in but could not fetch CSRF token'
+            return None
+        except requests.exceptions.Timeout:
+            return f'Timed out reaching {self._url}'
+        except requests.exceptions.ConnectionError as e:
+            return f'Cannot reach {self._url}: {_short_reason(e)}'
+        except requests.exceptions.HTTPError as e:
+            return f'HTTP {e.response.status_code} from {self._url}'
+        except (json.JSONDecodeError, ValueError, KeyError, TypeError):
+            return f'Unexpected response from {self._url} (not a MediaWiki api.php?)'
+        except requests.exceptions.RequestException as e:
+            return f'Request to {self._url} failed: {_short_reason(e)}'
 
     def _fetch_csrf(self) -> str | None:
         try:
             r = self._session.get(self._url, params={
                 'action': 'query', 'meta': 'tokens', 'format': 'json'
-            })
+            }, timeout=15)
             r.raise_for_status()
             return r.json()['query']['tokens']['csrftoken']
         except Exception:
