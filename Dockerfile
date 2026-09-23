@@ -21,4 +21,6 @@ VOLUME ["/data"]
 EXPOSE 5055
 
 # Single worker: plans and SSE queues live in process memory.
-CMD ["sh", "-c", "exec gunicorn -k gthread -w 1 --threads 8 --timeout 300 -b 0.0.0.0:${PORT} app:app"]
+# No control socket: it defaults to $HOME/.gunicorn, which isn't writable when
+# the container runs as an arbitrary DSM uid with no home directory.
+CMD ["sh", "-c", "exec gunicorn -k gthread -w 1 --threads 8 --timeout 300 --no-control-socket -b 0.0.0.0:${PORT} app:app"]
