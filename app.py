@@ -45,6 +45,9 @@ _wiki_clients: dict[str, WikiClient] = {}
 _job_queues: dict[str, queue.Queue] = {}      # plan phase 1 SSE queues
 _exec_queues: dict[str, queue.Queue] = {}     # execute phase 2 SSE queues
 _cancel_events: dict[str, threading.Event] = {}
+_preview_jobs: dict[tuple, dict] = {}         # (plan_id, step_id) -> {state, error}
+_preview_jobs_lock = threading.Lock()
+_plan_save_lock = threading.Lock()
 
 
 # ─── CONNECTIONS ──────────────────────────────────────────────────────────────
@@ -814,6 +817,10 @@ def archive_plan(plan_id: str):
 
 @app.route('/api/agent/step/preview', methods=['POST'])
 def step_preview_route():
+    """Start generating a step's content in the background; poll /status for the result.
+
+    Generation can take many minutes, so it doesn't hold the request open.
+    """
     body = request.json or {}
     plan_id = body.get('plan_id')
     step_id = body.get('step_id')
@@ -821,6 +828,9 @@ def step_preview_route():
     plan = _plans.get(plan_id) or _plan_from_disk(plan_id)
     if not plan:
         return jsonify({'error': 'Plan not found'}), 404
+    # Share one plan object between concurrent previews so each save keeps the
+    # content the others generated.
+    plan = _plans.setdefault(plan_id, plan)
 
     step = next((s for s in plan.steps if s.id == step_id), None)
     if not step:
@@ -830,27 +840,48 @@ def step_preview_route():
     if not conn:
         return jsonify({'error': 'Connection not found'}), 400
 
-    client = get_wiki_client(conn['id'])
-    if not client:
-        return jsonify({'error': 'Wiki connection failed'}), 500
+    key = (plan_id, step_id)
+    with _preview_jobs_lock:
+        if _preview_jobs.get(key, {}).get('state') == 'running':
+            return jsonify({'started': True, 'state': 'running'})
+        _preview_jobs[key] = {'state': 'running', 'error': None}
 
-    index = _site_index(client, conn)
-
-    agent = WikiAgent(
-        client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
-        site_index=index, recent_pages=site_index.get_recent_pages(conn['id']),
-    )
-    def work():
+    def worker():
         try:
+            client = get_wiki_client(conn['id'])
+            agent = WikiAgent(
+                client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
+                site_index=_site_index(client, conn),
+                recent_pages=site_index.get_recent_pages(conn['id']),
+            )
             agent.generate_step_preview(step)
-            _plans[plan_id] = plan
-            _save_plan_to_disk(plan)
-            return {'success': True, 'step': step.to_dict()}
+            step.error = None
+            with _plan_save_lock:
+                _save_plan_to_disk(plan)
+            _preview_jobs[key] = {'state': 'done', 'error': None}
         except Exception as e:
             logging.getLogger(__name__).exception('Content generation failed for step %s (%s)', step_id, step.title)
-            return {'success': False, 'error': str(e), 'step': step.to_dict()}
+            _preview_jobs[key] = {'state': 'error', 'error': str(e)}
 
-    return _json_with_keepalive(work)
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({'started': True, 'state': 'running'})
+
+
+@app.route('/api/agent/step/preview/status', methods=['GET'])
+def step_preview_status():
+    plan_id = request.args.get('plan_id')
+    step_id = request.args.get('step_id')
+    plan = _plans.get(plan_id) or _plan_from_disk(plan_id)
+    step = next((s for s in plan.steps if s.id == step_id), None) if plan else None
+    if not step:
+        return jsonify({'state': 'error', 'error': 'Step not found'}), 404
+    job = _preview_jobs.get((plan_id, step_id))
+    if job:
+        state, error = job['state'], job['error']
+    else:
+        # No job in this process (e.g. the server restarted): report what's saved.
+        state, error = ('done', None) if step.content else ('unknown', None)
+    return jsonify({'state': state, 'error': error, 'step': step.to_dict()})
 
 
 @app.route('/api/agent/step/approve', methods=['POST'])
