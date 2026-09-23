@@ -847,6 +847,7 @@ def step_preview_route():
             _save_plan_to_disk(plan)
             return {'success': True, 'step': step.to_dict()}
         except Exception as e:
+            logging.getLogger(__name__).exception('Content generation failed for step %s (%s)', step_id, step.title)
             return {'success': False, 'error': str(e), 'step': step.to_dict()}
 
     return _json_with_keepalive(work)
