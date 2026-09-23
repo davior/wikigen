@@ -120,6 +120,23 @@ Requires DSM 7.2+ with **Container Manager** on an x86 NAS.
 
 Updates restart the container, and in-flight plans that haven't been saved to `plans/` are lost, so avoid merging mid-run.
 
+### Troubleshooting
+
+Open `http://<nas-ip>:5055/api/check_connection` (or Container Manager → wikigen → Log) to see why the wiki connection fails:
+
+| Error | Fix |
+|---|---|
+| `Cannot reach …: Failed to resolve` | Container DNS is broken. Keep the `dns:` entries in the compose file (or use your router's IP) and rebuild the project. |
+| `Cannot reach …: Connection refused` | Wrong host or port, or `localhost` in the URL. Inside the container `localhost` is the container itself, so use the LAN IP or hostname. |
+| `Timed out reaching …` | If the wiki is on your LAN, uncomment `extra_hosts` in the compose file (router without NAT loopback), or allow `172.16.0.0/12` in the DSM firewall. |
+| `Login failed: …` | Network is fine; check the bot username/password in the connections manager. |
+
+Test name resolution from the NAS over SSH:
+
+```bash
+sudo docker exec wikigen python -c "import socket; print(socket.gethostbyname('yourwiki.example.com'))"
+```
+
 ---
 
 ## Bot Setup
