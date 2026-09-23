@@ -126,9 +126,9 @@ Open `http://<nas-ip>:5055/api/check_connection` (or Container Manager → wikig
 
 | Error | Fix |
 |---|---|
-| `Cannot reach …: Failed to resolve` | Container DNS is broken. Keep the `dns:` entries in the compose file (or use your router's IP) and rebuild the project. |
-| `Cannot reach …: Connection refused` | Wrong host or port, or `localhost` in the URL. Inside the container `localhost` is the container itself, so use the LAN IP or hostname. |
-| `Timed out reaching …` | If the wiki is on your LAN, uncomment `extra_hosts` in the compose file (router without NAT loopback), or allow `172.16.0.0/12` in the DSM firewall. |
+| `Cannot reach …: Failed to resolve` | The container can't do DNS. Make sure the project uses `network_mode: host` (as in `deploy/docker-compose.yml`) and rebuild it. |
+| `Cannot reach …: Connection refused` | Wrong host or port in the wiki URL. Use the wiki's real hostname or LAN IP. |
+| `Timed out reaching …` | If the wiki is on your LAN and addressed by its public domain, your router may lack NAT loopback; use its LAN address instead. Also check the DSM firewall. |
 | `Login failed: …` | Network is fine; check the bot username/password in the connections manager. |
 
 Test name resolution from the NAS over SSH:
