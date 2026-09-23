@@ -82,12 +82,43 @@ python app.py
 # → http://localhost:5055
 ```
 
-For production (Synology NAS or similar):
+For production, run under gunicorn with a **single worker**. Plans and SSE queues live in process memory, so add threads, not workers:
 
 ```bash
 pip install gunicorn
-gunicorn -k gthread -w 1 --threads 4 -b 0.0.0.0:5055 app:app
+gunicorn -k gthread -w 1 --threads 8 --timeout 300 -b 0.0.0.0:5055 app:app
 ```
+
+---
+
+## Deploying on Synology (auto-updating)
+
+Every push to `main` builds a Docker image and publishes it to `ghcr.io/davior/wikigen` (`.github/workflows/docker-publish.yml`). On the NAS, [Watchtower](https://containrrr.dev/watchtower/) checks for a new image every 5 minutes and restarts WikiGen on it. After the one-time setup below, merging a PR is all it takes to deploy. The NAS needs no git access.
+
+Requires DSM 7.2+ with **Container Manager** on an x86 NAS.
+
+### One-time setup
+
+1. **Folder.** In File Station, create `docker/wikigen/` (i.e. `/volume1/docker/wikigen/`) containing:
+   - `.env`: copy of `.env.example` with your keys filled in. `DATA_DIR` is forced to `/data` by the compose file.
+   - `data/`: empty folder. It holds `connections.json`, `history.json`, `plans/` and `uploads/`. Copy existing ones in here to keep them.
+2. **User ID.** SSH into the NAS and run `id`. Put your `uid:gid` in the `user:` line of `deploy/docker-compose.yml` (default `1026:100`) so the container can write to `data/`.
+3. **Image access.** After the first workflow run, open the package on GitHub (profile → Packages → wikigen). Then either:
+   - set its visibility to **Public** (the image contains no secrets; those stay in `.env`), or
+   - keep it private: create a classic PAT with only `read:packages`, then on the NAS run
+     `docker login ghcr.io -u <github-user>` (paste the PAT) and copy `~/.docker/config.json` to `/volume1/docker/wikigen/config.json`. Uncomment the `config.json` mount in the compose file so Watchtower can pull too. Container Manager → Registry → Settings → Add also lets DSM pull it.
+4. **Project.** Container Manager → Project → Create → path `/volume1/docker/wikigen` → *Create docker-compose.yml* → paste `deploy/docker-compose.yml` → Done.
+5. Browse to `http://<nas-ip>:5055`.
+
+**HTTPS (optional):** Control Panel → Login Portal → Advanced → Reverse Proxy. Map `https://wikigen.<your-domain>` to `http://localhost:5055`. Under *Custom Header*, add the WebSocket preset, and set a long proxy timeout so streaming plans aren't cut off.
+
+### Day to day
+
+- **Update:** merge to `main`. The new version is live within ~5 minutes of the workflow finishing. Check Container Manager → Container → wikigen-watchtower → Log to watch it happen.
+- **Force update now:** Container Manager → Project → wikigen → Action → Build (re-pulls `latest`).
+- **Roll back:** change the image to a specific build, e.g. `ghcr.io/davior/wikigen:sha-1a2b3c4` (tags are listed on the package page), and rebuild the project. Switch back to `:latest` to resume auto-updates.
+
+Updates restart the container, and in-flight plans that haven't been saved to `plans/` are lost, so avoid merging mid-run.
 
 ---
 

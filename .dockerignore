@@ -1,0 +1,14 @@
+.git
+.github
+.venv
+venv
+__pycache__
+*.pyc
+.env
+connections.json
+history.json
+archived_plans.json
+plans/
+uploads/
+data/
+deploy/
