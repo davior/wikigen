@@ -6,6 +6,7 @@ import os
 import queue
 import re
 import threading
+import time
 import uuid
 import dataclasses
 from datetime import datetime, timezone
@@ -655,6 +656,10 @@ def agent_plan():
 @app.route('/api/agent/plan/stream/<plan_id>')
 def agent_plan_stream(plan_id: str):
     def generate():
+        # Send something immediately so headers go out: gunicorn holds them
+        # until the first chunk, and browsers drop a silent EventSource.
+        yield ': connected\n\n'
+
         job_q = _job_queues.get(plan_id)
         if not job_q:
             yield _sse({'type': 'error', 'error': 'Job not found'})
@@ -662,7 +667,7 @@ def agent_plan_stream(plan_id: str):
 
         while True:
             try:
-                event = job_q.get(timeout=60)
+                event = job_q.get(timeout=15)
             except queue.Empty:
                 yield ': keepalive\n\n'
                 continue
@@ -671,7 +676,13 @@ def agent_plan_stream(plan_id: str):
 
             if event.get('type') in ('done', 'error'):
                 _job_queues.pop(plan_id, None)
-                plan = _plans.get(plan_id)
+                # 'done' is emitted from inside generate_plan(), just before the
+                # worker swaps the placeholder for the finished plan.
+                for _ in range(50):
+                    plan = _plans.get(plan_id)
+                    if not plan or plan.status != 'running':
+                        break
+                    time.sleep(0.2)
                 if plan and event.get('type') == 'done':
                     yield _sse({
                         'type': 'plan_complete',

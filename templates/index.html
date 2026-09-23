@@ -1036,15 +1036,30 @@ async function doPlan() {
         es.close();
         resolve();
       } else if (event.type === 'error') {
+        es.close();
+        // A reconnect after the plan finished finds no job; the plan itself is saved.
+        if (event.error === 'Job not found') {
+          loadFinishedPlan(data.plan_id).then(resolve);
+          return;
+        }
         isStreaming = false;
         currentPlan.description = 'Planning failed';
         renderPlanView();
         showToast('Planning error: ' + event.error, 'error');
-        es.close();
         resolve();
       }
     };
-    es.onerror = () => { isStreaming = false; renderPlanView(); es.close(); resolve(); };
+    // EventSource reconnects on its own after a dropped connection, and the
+    // server keeps the job queue, so only give up after repeated failures.
+    // Then fall back to fetching the plan, which may already be finished.
+    let errorCount = 0;
+    es.onopen = () => { errorCount = 0; };
+    es.onerror = async () => {
+      if (es.readyState !== EventSource.CLOSED && ++errorCount < 5) return;
+      es.close();
+      await loadFinishedPlan(data.plan_id);
+      resolve();
+    };
   });
 
   setCancelVisible(false);
@@ -1065,6 +1080,25 @@ function loadPlan(data) {
   showToast(`Plan ready: ${(data.steps || []).length} steps`, 'success');
   loadPlanHistory();
   updateExecuteBtn();
+}
+
+async function loadFinishedPlan(planId) {
+  isStreaming = false;
+  try {
+    const resp = await fetch(`${API_BASE}/api/agent/plan/${planId}`);
+    const plan = await resp.json();
+    if (resp.ok && plan.status !== 'running' && (plan.steps || []).length) {
+      currentPlan.description = plan.description;
+      currentPlan.steps = plan.steps;
+      renderPlanView();
+      showToast(`Plan ready: ${plan.steps.length} step${plan.steps.length !== 1 ? 's' : ''}`, 'success');
+      loadPlanHistory();
+      return;
+    }
+  } catch (e) { /* fall through */ }
+  renderPlanView();
+  showToast('Lost connection while planning. The plan will appear in history when it finishes.', 'error');
+  loadPlanHistory();
 }
 
 function renderPlanView() {
