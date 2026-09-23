@@ -8,6 +8,16 @@ services:
     # Find the numbers with `id` over SSH (typically 1026:100).
     user: "1026:100"
     env_file: .env
+    # Explicit resolvers: Synology project networks often inherit a DNS setup
+    # the container can't use ("Failed to resolve"). Swap in your router's IP
+    # (e.g. 192.168.0.1) if you rely on local DNS names.
+    dns:
+      - 1.1.1.1
+      - 9.9.9.9
+    # If the wiki is hosted on your LAN and the router lacks NAT loopback,
+    # point its hostname straight at the LAN address:
+    # extra_hosts:
+    #   - "yourwiki.example.com:192.168.0.x"
     environment:
       DATA_DIR: /data
     volumes:
