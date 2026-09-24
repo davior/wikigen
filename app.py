@@ -11,12 +11,15 @@ import uuid
 import dataclasses
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 import anthropic
 from dotenv import load_dotenv
-from flask import Flask, Response, jsonify, render_template, request, stream_with_context
+from flask import (Flask, Response, jsonify, redirect, render_template, request,
+                   send_from_directory, stream_with_context)
 from flask_cors import CORS
 
+import image_gen
 import site_index
 from agent import OperationPlan, OperationStep, WikiAgent, _make_diff
 from wiki_client import WikiClient
@@ -37,6 +40,7 @@ ARCHIVED_PLANS_FILE = DATA_DIR / 'archived_plans.json'
 UPLOADS_DIR = DATA_DIR / 'uploads'
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 site_index.set_storage_dir(DATA_DIR)
+image_gen.set_storage_dir(DATA_DIR)
 
 anthropic_client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY', ''))
 
@@ -48,6 +52,10 @@ _cancel_events: dict[str, threading.Event] = {}
 _preview_jobs: dict[tuple, dict] = {}         # (plan_id, step_id) -> {state, error}
 _preview_jobs_lock = threading.Lock()
 _plan_save_lock = threading.Lock()
+_connections_lock = threading.Lock()
+
+# Connection fields never sent back to the browser; an empty value on update keeps the old one.
+_SECRET_FIELDS = ('password', 'fal_key', 'api_token')
 
 
 # ─── CONNECTIONS ──────────────────────────────────────────────────────────────
@@ -97,6 +105,42 @@ def _get_connection_by_id(connection_id: str) -> dict | None:
         if conn['id'] == connection_id:
             return conn
     return None
+
+
+def _public_connection(conn: dict) -> dict:
+    """A connection as the browser sees it: secrets replaced by has_<field> flags."""
+    public = {k: v for k, v in conn.items() if k not in _SECRET_FIELDS}
+    for key in _SECRET_FIELDS:
+        public[f'has_{key}'] = bool(conn.get(key))
+    return public
+
+
+class _ImageStyleStore:
+    """A connection's image style guide in connections.json, shared by every agent."""
+
+    def __init__(self, connection_id: str):
+        self.connection_id = connection_id
+
+    def get(self) -> str:
+        return ((_get_connection_by_id(self.connection_id) or {}).get('image_style') or '').strip()
+
+    def set(self, style: str) -> str:
+        """Save `style` unless a style was saved meanwhile; return the one in effect."""
+        with _connections_lock:
+            data = _load_connections()
+            for conn in data.get('connections', []):
+                if conn['id'] == self.connection_id:
+                    if (conn.get('image_style') or '').strip():
+                        return conn['image_style'].strip()
+                    conn['image_style'] = style
+                    _save_connections(data)
+        return style
+
+
+def _make_agent(client: WikiClient, conn: dict, **kwargs) -> WikiAgent:
+    return WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
+                     image_generator=image_gen.from_connection(conn),
+                     style_store=_ImageStyleStore(conn['id']), **kwargs)
 
 
 def get_wiki_client(connection_id: str) -> WikiClient | None:
@@ -261,6 +305,7 @@ def _plan_from_disk(plan_id: str) -> OperationPlan | None:
             images=s.get('images', []),
             source_url=s.get('source_url'),
             upload_id=s.get('upload_id'),
+            notice=s.get('notice'),
         ))
     return plan
 
@@ -306,7 +351,8 @@ def _attach_uploads_to_plan(plan: OperationPlan, context_pages: list):
 
 @app.route('/api/connections', methods=['GET'])
 def list_connections():
-    return jsonify(_load_connections())
+    data = _load_connections()
+    return jsonify({**data, 'connections': [_public_connection(c) for c in data.get('connections', [])]})
 
 
 @app.route('/api/connections', methods=['POST'])
@@ -322,12 +368,17 @@ def add_connection():
         'system_prompt': body.get('system_prompt', ''),
         'chips': body.get('chips', []),
         'index_page': body.get('index_page', ''),
+        'fal_key': body.get('fal_key', ''),
+        'image_model': body.get('image_model', ''),
+        'image_params': body.get('image_params'),
+        'images_per_page': body.get('images_per_page', image_gen.DEFAULT_IMAGES_PER_PAGE),
+        'image_style': body.get('image_style', ''),
     }
     data['connections'].append(conn)
     if not data.get('active_connection_id'):
         data['active_connection_id'] = conn['id']
     _save_connections(data)
-    return jsonify({'success': True, 'connection': conn})
+    return jsonify({'success': True, 'connection': _public_connection(conn)})
 
 
 @app.route('/api/connections/<conn_id>', methods=['PUT'])
@@ -336,10 +387,11 @@ def update_connection(conn_id: str):
     data = _load_connections()
     for conn in data['connections']:
         if conn['id'] == conn_id:
-            conn.update({k: v for k, v in body.items() if k != 'id' and not (k == 'password' and not v)})
+            conn.update({k: v for k, v in body.items()
+                         if k != 'id' and not k.startswith('has_') and not (k in _SECRET_FIELDS and not v)})
             _wiki_clients.pop(conn_id, None)
             _save_connections(data)
-            return jsonify({'success': True, 'connection': conn})
+            return jsonify({'success': True, 'connection': _public_connection(conn)})
     return jsonify({'error': 'Not found'}), 404
 
 
@@ -402,6 +454,21 @@ def refresh_index(conn_id: str):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/connections/<conn_id>/image_style/draft', methods=['POST'])
+def draft_image_style(conn_id: str):
+    """Draft a house image style from the wiki's system prompt and site index."""
+    conn = _get_connection_by_id(conn_id)
+    if not conn:
+        return jsonify({'error': 'Not found'}), 404
+    body = request.json or {}
+    # Use the system prompt as currently typed in the form, saved or not.
+    conn = {**conn, 'system_prompt': body.get('system_prompt', conn.get('system_prompt', ''))}
+    client = get_wiki_client(conn_id)
+    index = _site_index(client, conn) if client else {}
+    agent = _make_agent(client, conn, site_index=index)
+    return _json_with_keepalive(lambda: {'style': agent.draft_image_style()})
+
+
 # ─── LEGACY CHECK CONNECTION ──────────────────────────────────────────────────
 
 @app.route('/api/check_connection')
@@ -427,6 +494,10 @@ def publish():
     client = get_wiki_client(conn['id'])
     if not client:
         return jsonify({'error': 'Wiki connection failed'}), 500
+    try:
+        image_gen.upload_generated_refs(client, body['content'])
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
     result = client.write_page(body['title'], body['content'], body.get('summary', ''))
 
     # If step belongs to a plan, mark it as done and save
@@ -515,14 +586,61 @@ def wiki_rewrite():
     else:
         index = _site_index(client, conn)
 
-    agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
-                      site_index=index, recent_pages=site_index.get_recent_pages(conn['id']))
+    agent = _make_agent(client, conn, site_index=index, recent_pages=site_index.get_recent_pages(conn['id']))
 
     def work():
-        new_content = agent._edit_page_content(title, content, instruction)
-        return {'content': new_content, 'diff': _make_diff(content, new_content)}
+        data = agent._edit_page_content(title, content, instruction)
+        return {'content': data['content'], 'diff': _make_diff(content, data['content']),
+                'images': data['images'], 'notice': data['notice']}
 
     return _json_with_keepalive(work)
+
+
+@app.route('/api/wiki/generate_images', methods=['POST'])
+def wiki_generate_images():
+    """Add generated images to the page open in the editor; returns the new content."""
+    body = request.json or {}
+    title = body.get('title', '').strip()
+    content = body.get('content', '')
+    if not title or not content.strip():
+        return jsonify({'error': 'title and content required'}), 400
+    try:
+        count = max(1, min(image_gen.MAX_IMAGES_PER_PAGE, int(body.get('count') or 3)))
+    except (TypeError, ValueError):
+        count = 3
+
+    conn = _resolve_connection(body)
+    if not conn:
+        return jsonify({'error': 'No wiki connection configured'}), 400
+    client = get_wiki_client(conn['id'])
+    if not client:
+        return jsonify({'error': 'Wiki connection failed'}), 500
+
+    agent = _make_agent(client, conn, site_index=_site_index(client, conn),
+                        recent_pages=site_index.get_recent_pages(conn['id']))
+
+    def work():
+        result = agent.illustrate(title, content, hint=body.get('hint', '').strip(), count=count)
+        return {**result, 'diff': _make_diff(content, result['content'])}
+
+    return _json_with_keepalive(work)
+
+
+@app.route('/api/image/<path:filename>')
+def image_file(filename: str):
+    """Serve a generated image, or redirect to the wiki's copy of any other file."""
+    name = image_gen.find_generated(filename)
+    if name:
+        return send_from_directory(image_gen.storage_dir(), name, max_age=86400)
+    width = request.args.get('width', type=int)
+    size = f'width={width}' if width else ''
+    conn = _resolve_connection()
+    wiki_url = (conn or {}).get('wiki_url', '')
+    if 'api.php' in wiki_url:
+        index = wiki_url.split('api.php', 1)[0] + 'index.php'
+        return redirect(f'{index}?title=Special:FilePath/{quote(filename)}' + (f'&{size}' if size else ''))
+    return redirect(f'https://commons.wikimedia.org/wiki/Special:FilePath/{quote(filename)}'
+                    + (f'?{size}' if size else ''))
 
 
 # ─── DOCUMENT UPLOAD & URL FETCH ─────────────────────────────────────────────
@@ -669,9 +787,8 @@ def agent_plan():
     def _worker():
         index = _site_index(client, conn)
 
-        agent = WikiAgent(
-            client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
-            site_index=index, context_pages=context_pages,
+        agent = _make_agent(
+            client, conn, site_index=index, context_pages=context_pages,
             recent_pages=site_index.get_recent_pages(conn['id']),
         )
         agent._stream_callback = lambda evt: job_q.put(evt)
@@ -849,9 +966,8 @@ def step_preview_route():
     def worker():
         try:
             client = get_wiki_client(conn['id'])
-            agent = WikiAgent(
-                client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
-                site_index=_site_index(client, conn),
+            agent = _make_agent(
+                client, conn, site_index=_site_index(client, conn),
                 recent_pages=site_index.get_recent_pages(conn['id']),
             )
             agent.generate_step_preview(step)
@@ -940,8 +1056,7 @@ def execute_step_route():
         return jsonify({'error': 'Wiki connection failed'}), 500
 
     step.status = 'approved'
-    agent = WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
-                      uploads_dir=UPLOADS_DIR)
+    agent = _make_agent(client, conn, uploads_dir=UPLOADS_DIR)
     result = agent.execute_step(step)
     _plans[plan_id] = plan
     _save_plan_to_disk(plan)
@@ -988,9 +1103,8 @@ def execute_plan_route():
     def _exec_worker():
         index = _site_index(client, conn)
 
-        agent = WikiAgent(
-            client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
-            site_index=index, uploads_dir=UPLOADS_DIR,
+        agent = _make_agent(
+            client, conn, site_index=index, uploads_dir=UPLOADS_DIR,
             recent_pages=site_index.get_recent_pages(conn['id']),
         )
         agent._stream_callback = lambda evt: exec_q.put(evt)

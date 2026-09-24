@@ -178,8 +178,13 @@ textarea#prompt::placeholder { color: var(--text3); }
 .step-done-msg { padding: 0 11px 7px; font-size: 9px; font-family: 'IBM Plex Mono', monospace; letter-spacing: 0.5px; }
 .step-done-msg.done { color: var(--accent); }
 .step-done-msg.failed { color: var(--danger); }
-.step-image-thumb { padding: 5px 11px 7px; }
-.step-image-thumb img { max-width: 100%; max-height: 120px; border-radius: 3px; border: 1px solid var(--border2); display: block; }
+.step-notice { padding: 0 11px 7px; font-size: 9px; color: var(--warn); font-family: 'IBM Plex Mono', monospace; line-height: 1.4; }
+.step-image-row { display: flex; gap: 6px; padding: 5px 11px 7px; overflow-x: auto; }
+.step-image-thumb { flex-shrink: 0; }
+.step-image-thumb img { max-width: 160px; max-height: 90px; border-radius: 3px; border: 1px solid var(--border2); display: block; }
+.form-section-title { font-size: 10px; font-family: 'IBM Plex Mono', monospace; color: var(--accent); letter-spacing: 1px; margin: 22px 0 12px; padding-top: 14px; border-top: 1px solid var(--border); }
+.form-row { display: flex; gap: 10px; }
+.form-row .form-group { flex: 1; }
 
 /* GRAPH TAB */
 .graph-panel { flex: 1; position: relative; overflow: hidden; }
@@ -261,6 +266,7 @@ textarea#prompt::placeholder { color: var(--text3); }
 .open-wiki-btn { background: none; border: 1px solid var(--border2); border-radius: 3px; color: var(--text3); cursor: pointer; font-family: 'IBM Plex Mono', monospace; font-size: 9px; padding: 4px 9px; letter-spacing: 0.5px; text-decoration: none; display: inline-block; transition: all 0.15s; }
 .open-wiki-btn:hover { border-color: var(--accent); color: var(--accent); }
 .rewrite-panel { padding: 10px 12px 12px; border-top: 1px solid var(--border); background: var(--bg2); flex-shrink: 0; }
+.rewrite-panel.hidden { display: none; }
 .rewrite-input { width: 100%; box-sizing: border-box; resize: vertical; background: var(--bg3); color: var(--text); border: 1px solid var(--border2); border-radius: 3px; padding: 7px 9px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; margin-bottom: 8px; outline: none; line-height: 1.5; transition: border-color 0.2s; }
 .rewrite-input:focus { border-color: var(--accent); }
 .rewrite-controls { display: flex; align-items: center; gap: 10px; }
@@ -530,10 +536,26 @@ textarea#prompt::placeholder { color: var(--text3); }
         <button class="btn btn-primary btn-sm" onclick="submitRewrite()" id="rewriteSubmitBtn">AI REWRITE</button>
       </div>
     </div>
+    <div class="rewrite-panel hidden" id="imagesPanel">
+      <textarea id="imagesHint" class="rewrite-input"
+                placeholder="Optional: what the images should show, e.g. focus on the history section / show the device itself"
+                rows="2"></textarea>
+      <div class="rewrite-controls">
+        <label class="rewrite-scope-label">
+          <span>Images</span>
+          <select id="imagesCount" class="rewrite-input" style="width:auto;margin:0;padding:3px 6px">
+            <option>1</option><option>2</option><option selected>3</option><option>4</option>
+          </select>
+          <span style="color:var(--text3)">added to sections without one</span>
+        </label>
+        <button class="btn btn-primary btn-sm" onclick="submitGenerateImages()" id="imagesSubmitBtn">GENERATE IMAGES</button>
+      </div>
+    </div>
     <div class="editor-footer">
       <button class="btn btn-success btn-sm" id="publishBtn" onclick="publishCurrent()">✓ PUBLISH</button>
       <button class="btn btn-primary btn-sm" onclick="saveEdits()">SAVE</button>
       <button class="context-btn" id="rewriteToggleBtn" onclick="toggleRewritePanel()">✎ REWRITE</button>
+      <button class="context-btn" id="imagesToggleBtn" onclick="toggleImagesPanel()">🖼 IMAGES</button>
       <button class="context-btn" id="contextBtn" onclick="toggleContext()">+ CONTEXT</button>
       <a class="open-wiki-btn" id="openWikiBtn" href="#" target="_blank">↗ WIKI</a>
       <div style="flex:1"></div>
@@ -602,6 +624,37 @@ textarea#prompt::placeholder { color: var(--text3); }
       <div class="form-group">
         <label class="form-label">Quick Prompt Chips (comma separated)</label>
         <input class="form-input" id="connFormChips" placeholder="Transhumanism, DEWs, TI Program">
+      </div>
+
+      <div class="form-section-title">// IMAGE GENERATION (FAL.AI)</div>
+      <div class="form-group">
+        <label class="form-label">fal.ai API Key</label>
+        <input class="form-input" type="password" id="connFormFalKey" placeholder="Leave blank to keep existing key" autocomplete="off">
+        <div class="form-hint" id="connFormFalKeyHint">Get one at fal.ai → Dashboard → Keys. Without a key, pages are written without images.</div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Model</label>
+          <input class="form-input" id="connFormImageModel" list="falModelPresets" placeholder="fal-ai/flux/dev" onchange="applyModelPreset()">
+          <datalist id="falModelPresets"></datalist>
+        </div>
+        <div class="form-group" style="flex:0 0 130px">
+          <label class="form-label">Images / new page</label>
+          <input class="form-input" type="number" min="0" max="4" id="connFormImagesPerPage" placeholder="3">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Model Parameters (JSON)</label>
+        <input class="form-input" id="connFormImageParams" placeholder='{"image_size": "landscape_4_3"}'>
+        <div class="form-hint">Sent to the model with each prompt. FLUX models take "image_size"; most others take "aspect_ratio". Any model ID from fal.ai works.</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label" style="display:flex;align-items:center">
+          <span style="flex:1">House Style Guide</span>
+          <button class="step-btn step-btn-approve" type="button" id="draftStyleBtn" onclick="draftImageStyle()">DRAFT FROM WIKI</button>
+        </label>
+        <textarea class="form-textarea" id="connFormImageStyle" placeholder="Added to every image prompt so the wiki's images share one look. Leave blank to have it drafted from the wiki on first use."></textarea>
+        <div class="form-hint" id="draftStyleHint">Describe medium, palette, lighting and mood, not subjects.</div>
       </div>
     </div>
     <div class="modal-footer">
@@ -767,6 +820,68 @@ function activateConn(id) {
     .then(() => { activeConnectionId = id; openConnectionsModal(); checkConnection(); renderChips(); });
 }
 
+// fal.ai model presets. Picking one fills in the size parameter that model expects;
+// any other fal.ai model ID can be typed in with its own parameters.
+const FAL_MODEL_PRESETS = {
+  'fal-ai/flux/dev': { image_size: 'landscape_4_3' },
+  'fal-ai/flux/schnell': { image_size: 'landscape_4_3' },
+  'fal-ai/flux-pro/v1.1': { image_size: 'landscape_4_3' },
+  'fal-ai/flux-pro/v1.1-ultra': { aspect_ratio: '4:3' },
+  'fal-ai/imagen4/preview': { aspect_ratio: '4:3' },
+  'fal-ai/nano-banana': { aspect_ratio: '4:3' },
+};
+const FAL_KEY_HINT = 'Get one at fal.ai → Dashboard → Keys. Without a key, pages are written without images.';
+
+function fillImageSettings(conn) {
+  document.getElementById('falModelPresets').innerHTML =
+    Object.keys(FAL_MODEL_PRESETS).map(m => `<option value="${m}">`).join('');
+  document.getElementById('connFormFalKey').value = '';
+  document.getElementById('connFormFalKeyHint').textContent = conn.has_fal_key
+    ? 'A key is saved. Leave blank to keep it.' : FAL_KEY_HINT;
+  document.getElementById('connFormImageModel').value = conn.image_model || '';
+  document.getElementById('connFormImagesPerPage').value = conn.images_per_page ?? '';
+  const params = conn.image_params;
+  document.getElementById('connFormImageParams').value =
+    params == null ? '' : (typeof params === 'string' ? params : JSON.stringify(params));
+  document.getElementById('connFormImageStyle').value = conn.image_style || '';
+  document.getElementById('draftStyleBtn').disabled = !conn.id;
+  document.getElementById('draftStyleHint').textContent = conn.id
+    ? 'Describe medium, palette, lighting and mood, not subjects.'
+    : 'Save the connection first to draft a style from the wiki, or leave blank to draft it on first use.';
+}
+
+function applyModelPreset() {
+  const preset = FAL_MODEL_PRESETS[document.getElementById('connFormImageModel').value.trim()];
+  const paramsEl = document.getElementById('connFormImageParams');
+  const current = paramsEl.value.trim();
+  const isPreset = !current || Object.values(FAL_MODEL_PRESETS).some(p => JSON.stringify(p) === current);
+  if (preset && isPreset) paramsEl.value = JSON.stringify(preset);  // don't overwrite custom params
+}
+
+async function draftImageStyle() {
+  const id = document.getElementById('connFormId').value;
+  if (!id) { showToast('Save the connection first', 'error'); return; }
+  const btn = document.getElementById('draftStyleBtn');
+  btn.disabled = true;
+  btn.textContent = 'DRAFTING…';
+  try {
+    const resp = await fetch(`${API_BASE}/api/connections/${id}/image_style/draft`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ system_prompt: document.getElementById('connFormSystemPrompt').value }),
+    });
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    document.getElementById('connFormImageStyle').value = data.style || '';
+    showToast('Style drafted: edit it if you like, then SAVE', 'success');
+  } catch (err) {
+    showToast('Drafting failed: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'DRAFT FROM WIKI';
+  }
+}
+
 function editConn(id) {
   const conn = connections.find(c => c.id === id);
   if (!conn) return;
@@ -777,6 +892,7 @@ function editConn(id) {
   document.getElementById('connFormPassword').value = '';
   document.getElementById('connFormSystemPrompt').value = conn.system_prompt || '';
   document.getElementById('connFormChips').value = (conn.chips || []).join(', ');
+  fillImageSettings(conn);
   document.getElementById('connFormTitle').textContent = '// EDIT CONNECTION';
   document.getElementById('connFormModal').classList.add('active');
 }
@@ -795,6 +911,7 @@ function showAddConnectionForm() {
   document.getElementById('connFormPassword').value = '';
   document.getElementById('connFormSystemPrompt').value = '';
   document.getElementById('connFormChips').value = '';
+  fillImageSettings({});
   document.getElementById('connFormTitle').textContent = '// ADD CONNECTION';
   document.getElementById('connFormModal').classList.add('active');
 }
@@ -814,6 +931,23 @@ function saveConnection() {
   };
   const password = document.getElementById('connFormPassword').value;
   if (password) body.password = password;
+
+  const paramsText = document.getElementById('connFormImageParams').value.trim();
+  let imageParams = null;  // null = the model's default size parameter
+  if (paramsText) {
+    try { imageParams = JSON.parse(paramsText); } catch (e) { imageParams = undefined; }
+    if (!imageParams || typeof imageParams !== 'object' || Array.isArray(imageParams)) {
+      showToast('Model parameters must be a JSON object, e.g. {"image_size": "landscape_4_3"}', 'error');
+      return;
+    }
+  }
+  const perPage = document.getElementById('connFormImagesPerPage').value.trim();
+  body.image_model = document.getElementById('connFormImageModel').value.trim();
+  body.image_params = imageParams;
+  body.images_per_page = perPage === '' ? 3 : Math.max(0, Math.min(4, parseInt(perPage, 10) || 0));
+  body.image_style = document.getElementById('connFormImageStyle').value.trim();
+  const falKey = document.getElementById('connFormFalKey').value.trim();
+  if (falKey) body.fal_key = falKey;
   const url = id ? `${API_BASE}/api/connections/${id}` : API_BASE + '/api/connections';
   const method = id ? 'PUT' : 'POST';
   fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -1132,18 +1266,37 @@ function appendStepToView(step) {
   document.getElementById('stepList').appendChild(buildStepElement(step));
 }
 
-function buildImageThumbs(step) {
+// Generated images are served by WikiGen until they're uploaded; other files
+// redirect to the wiki's own copy.
+function imageUrl(filename, width) {
+  const params = new URLSearchParams();
+  if (activeConnectionId) params.set('connection_id', activeConnectionId);
+  if (width) params.set('width', width);
+  return `${API_BASE}/api/image/${encodeURIComponent(filename)}?${params}`;
+}
+
+function stepImages(step) {
   // Prefer the full images list; fall back to the single image_file (older plans).
-  let imgs = (step.images && step.images.length) ? step.images : [];
-  if (!imgs.length && step.image_file) {
-    imgs = [{ filename: step.image_file, commons_url: step.commons_url }];
+  if (step.images && step.images.length) return step.images;
+  return step.image_file ? [{ filename: step.image_file }] : [];
+}
+
+// Thumbnails and any notice (e.g. images that failed), shown under the step summary.
+function buildStepExtras(step) {
+  const imgs = stepImages(step);
+  let html = '';
+  if (imgs.length) {
+    html += '<div class="step-image-row">' + imgs.map(img => {
+      const title = img.caption ? ` title="${escapeHtml(img.caption)}"` : '';
+      return `<div class="step-image-thumb"${title}><img src="${imageUrl(img.filename, 400)}" alt="${escapeHtml(img.filename)}" onerror="this.parentElement.style.display='none'"></div>`;
+    }).join('') + '</div>';
   }
-  return imgs.map(img => {
-    const thumbSrc = `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(img.filename)}?width=400`;
-    const commonsAttr = img.commons_url ? ` data-commons="${escapeHtml(img.commons_url)}"` : '';
-    const title = img.caption ? ` title="${escapeHtml(img.caption)}"` : '';
-    return `<div class="step-image-thumb"${commonsAttr}${title}><img src="${thumbSrc}" alt="${escapeHtml(img.filename)}" onerror="this.parentElement.style.display='none'"></div>`;
-  }).join('');
+  if (step.notice) html += `<div class="step-notice">⚠ ${escapeHtml(step.notice)}</div>`;
+  return html;
+}
+
+function stepExtrasKey(step) {
+  return stepImages(step).map(i => i.filename).join('|') + '#' + (step.notice || '');
 }
 
 function buildStepElement(step) {
@@ -1154,7 +1307,7 @@ function buildStepElement(step) {
   const badgeClass = { write: 'badge-write', edit: 'badge-edit', move: 'badge-move', delete: 'badge-delete', replace: 'badge-replace', add_image: 'badge-image', upload_file: 'badge-upload' }[step.type] || 'badge-write';
   const badgeLabel = step.type === 'add_image' ? 'IMAGE' : step.type === 'upload_file' ? 'UPLOAD' : step.type.toUpperCase();
 
-  const imageThumbHtml = step.type === 'add_image' ? buildImageThumbs(step) : '';
+  div.dataset.extrasKey = stepExtrasKey(step);
 
   div.innerHTML = `
     <div class="step-header">
@@ -1167,7 +1320,7 @@ function buildStepElement(step) {
       </div>
     </div>
     <div class="step-summary">${escapeHtml(step.summary || step.description || '')}</div>
-    ${imageThumbHtml}
+    ${buildStepExtras(step)}
     ${step.error ? `<div class="step-error">✕ ${escapeHtml(step.error)}</div>` : ''}
   `;
 
@@ -1191,10 +1344,13 @@ function updateStepElement(step) {
   } else if (errEl) {
     errEl.remove();
   }
-  // Refresh add_image thumbnails if images were just populated
-  if (step.type === 'add_image' && !el.querySelector('.step-image-thumb')) {
-    const thumbsHtml = buildImageThumbs(step);
-    if (thumbsHtml) el.insertAdjacentHTML('beforeend', thumbsHtml);
+  // Refresh thumbnails and notice when generation has changed them
+  const extrasKey = stepExtrasKey(step);
+  if (el.dataset.extrasKey !== extrasKey) {
+    el.querySelector('.step-image-row')?.remove();
+    el.querySelector('.step-notice')?.remove();
+    el.querySelector('.step-summary').insertAdjacentHTML('afterend', buildStepExtras(step));
+    el.dataset.extrasKey = extrasKey;
   }
   // Show completion banner and remove pre-execution UI clutter
   if (step.status === 'done' || step.status === 'failed') {
@@ -1724,7 +1880,7 @@ function renderPreview(markup) {
       const parts = p1.split('|');
       const filename = parts[0].trim();
       const caption = parts[parts.length - 1].trim();
-      const thumbSrc = `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(filename)}?width=200`;
+      const thumbSrc = imageUrl(filename, 300);
       return `<figure class="wiki-image"><img src="${thumbSrc}" alt="${escapeHtml(caption)}" onerror="this.parentElement.style.display='none'"><figcaption>${escapeHtml(caption)}</figcaption></figure>`;
     })
     .replace(/\[\[(.*?)\]\]/g, (m, p1) => {
@@ -1782,6 +1938,67 @@ function toggleRewritePanel() {
   }
 }
 
+function toggleImagesPanel() {
+  const panel = document.getElementById('imagesPanel');
+  const btn = document.getElementById('imagesToggleBtn');
+  const isHidden = panel.classList.toggle('hidden');
+  btn.classList.toggle('active', !isHidden);
+  if (!isHidden) document.getElementById('imagesHint').focus();
+}
+
+// Generate images for the page open in the editor. They stay on the WikiGen
+// server until the page is published or its step executed.
+async function submitGenerateImages() {
+  if (!activeEditorPage) return;
+  const content = document.getElementById('content-editor').value || activeEditorPage.content || '';
+  if (!content.trim()) { showToast('This page has no content to illustrate yet', 'error'); return; }
+  const btn = document.getElementById('imagesSubmitBtn');
+  btn.disabled = true;
+  btn.textContent = 'GENERATING…';
+  try {
+    const resp = await fetch(`${API_BASE}/api/wiki/generate_images`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        connection_id: activeConnectionId,
+        title: activeEditorPage.title,
+        content,
+        hint: document.getElementById('imagesHint').value.trim(),
+        count: parseInt(document.getElementById('imagesCount').value, 10),
+      }),
+    });
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    activeEditorPage.content = data.content;
+    activeEditorPage.diff = data.diff || '';
+    document.getElementById('content-editor').value = data.content;
+    if (activeEditorPage.step_id && currentPlan) {
+      const step = findStep(activeEditorPage.step_id);
+      if (step) {
+        step.content = data.content;
+        step.diff = data.diff || '';
+        step.images = [...(step.images || []), ...(data.images || [])];
+        step.notice = data.notice || null;
+        updateStepElement(step);
+      }
+    }
+    renderPreview(data.content);
+    renderDiff(data.diff || '');
+    switchEditorTab('preview');
+    document.getElementById('imagesPanel').classList.add('hidden');
+    document.getElementById('imagesToggleBtn').classList.remove('active');
+    const n = (data.images || []).length;
+    const added = `Added ${n} image${n !== 1 ? 's' : ''}`;
+    if (data.notice) showToast(`${added}; ${data.notice}`, 'info');
+    else showToast(`${added}. Publish the page to upload them.`, 'success');
+  } catch (err) {
+    showToast('Image generation failed: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'GENERATE IMAGES';
+  }
+}
+
 async function submitRewrite() {
   if (!activeEditorPage) return;
   const instruction = document.getElementById('rewriteInstruction').value.trim();
@@ -1809,7 +2026,13 @@ async function submitRewrite() {
     document.getElementById('content-editor').value = data.content;
     if (activeEditorPage.step_id && currentPlan) {
       const step = findStep(activeEditorPage.step_id);
-      if (step) { step.content = data.content; step.diff = data.diff || ''; }
+      if (step) {
+        step.content = data.content;
+        step.diff = data.diff || '';
+        if (data.images && data.images.length) step.images = [...(step.images || []), ...data.images];
+        step.notice = data.notice || null;
+        updateStepElement(step);
+      }
     }
     renderPreview(data.content);
     renderDiff(data.diff || '');

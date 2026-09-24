@@ -334,14 +334,15 @@ class WikiClient:
         return {'success': False, 'error': 'delete_page failed after reconnect'}
 
     def upload_file(self, filename: str, file_data: bytes, mime_type: str = 'application/octet-stream',
-                    description: str = '') -> dict:
+                    description: str = '', comment: str | None = None) -> dict:
+        """Upload a file. `description` is the file page text; `comment` the log entry (defaults to it)."""
         for _attempt in range(2):
             self._ensure_csrf()
             self._rate_limit()
             r = self._session.post(self._url, data={
                 'action': 'upload',
                 'filename': filename,
-                'comment': description,
+                'comment': comment or description,
                 'text': description,
                 'token': self._csrf_token,
                 'format': 'json',
@@ -464,135 +465,6 @@ class WikiClient:
                 if pid != -1 and int(pid) > 0 and 'imageinfo' in page:
                     existing.add(page['title'][5:])  # strip "File:"
         return existing
-
-    @staticmethod
-    def search_commons_images(query: str, limit: int = 5) -> list[dict]:
-        """Search Wikimedia Commons for images. Returns list of {filename, thumb_url, commons_url}."""
-        headers = {'User-Agent': 'WikiGen/3.0 (wiki management bot; https://github.com/davior/wikigen)'}
-        api = 'https://commons.wikimedia.org/w/api.php'
-        r = requests.get(api, params={
-            'action': 'query',
-            'list': 'search',
-            'srnamespace': 6,
-            'srsearch': query,
-            'srlimit': limit,
-            'format': 'json',
-        }, headers=headers, timeout=10)
-        r.raise_for_status()
-        file_titles = [s['title'] for s in r.json().get('query', {}).get('search', [])]
-        if not file_titles:
-            return []
-
-        ir = requests.get(api, params={
-            'action': 'query',
-            'titles': '|'.join(file_titles),
-            'prop': 'imageinfo',
-            'iiprop': 'url|mime',
-            'iiurlwidth': 300,
-            'format': 'json',
-        }, headers=headers, timeout=10)
-        ir.raise_for_status()
-
-        images = []
-        for page in ir.json().get('query', {}).get('pages', {}).values():
-            if 'imageinfo' not in page:
-                continue
-            info = page['imageinfo'][0]
-            if not info.get('mime', '').startswith('image/'):
-                continue
-            filename = page['title'][5:]  # strip "File:"
-            images.append({
-                'filename': filename,
-                'thumb_url': info.get('thumburl', ''),
-                'commons_url': f"https://commons.wikimedia.org/wiki/File:{requests.utils.quote(filename, safe='')}",
-            })
-        return images
-
-    @staticmethod
-    def search_wikipedia_images(topic: str, limit: int = 10) -> list[dict]:
-        """Fetch images from the English Wikipedia article most relevant to `topic`.
-
-        Uses Wikipedia's search API to find the best-matching article title first,
-        so "Body Sensor Network" finds "Body area network", "Biological filaments"
-        finds "Microfilament", etc. — no exact title match required.
-
-        Returns [{filename, thumb_url, commons_url}] — same shape as search_commons_images.
-        """
-        headers = {'User-Agent': 'WikiGen/3.0 (wiki management bot; https://github.com/davior/wikigen)'}
-        wp_api = 'https://en.wikipedia.org/w/api.php'
-        commons_api = 'https://commons.wikimedia.org/w/api.php'
-
-        # Step 1: find the best-matching Wikipedia article title via search
-        rs = requests.get(wp_api, params={
-            'action': 'query',
-            'list': 'search',
-            'srsearch': topic,
-            'srlimit': 3,
-            'srnamespace': 0,
-            'format': 'json',
-        }, headers=headers, timeout=10)
-        rs.raise_for_status()
-        search_hits = rs.json().get('query', {}).get('search', [])
-
-        # Collect candidate titles: search results + the original topic (handles exact matches / redirects)
-        candidate_titles = [h['title'] for h in search_hits]
-        if topic not in candidate_titles:
-            candidate_titles.insert(0, topic)
-
-        # Step 2: try each candidate until we find one with images
-        image_titles: list[str] = []
-        for title in candidate_titles:
-            r = requests.get(wp_api, params={
-                'action': 'query',
-                'titles': title,
-                'prop': 'images',
-                'imlimit': 50,
-                'redirects': 1,
-                'format': 'json',
-            }, headers=headers, timeout=10)
-            r.raise_for_status()
-
-            pages = r.json().get('query', {}).get('pages', {})
-            page = next(iter(pages.values()), {})
-            image_titles = [
-                img['title'] for img in page.get('images', [])
-                if re.search(r'\.(jpe?g|png|svg|gif|webp)$', img['title'], re.IGNORECASE)
-                and not re.search(r'\b(icon|logo|flag|button|arrow|bullet|commons-logo)\b',
-                                  img['title'], re.IGNORECASE)
-            ][:limit]
-            if image_titles:
-                break
-
-        if not image_titles:
-            return []
-
-        r2 = requests.get(commons_api, params={
-            'action': 'query',
-            'titles': '|'.join(image_titles),
-            'prop': 'imageinfo',
-            'iiprop': 'url|mime',
-            'iiurlwidth': 300,
-            'format': 'json',
-        }, headers=headers, timeout=10)
-        r2.raise_for_status()
-
-        images = []
-        for p in r2.json().get('query', {}).get('pages', {}).values():
-            if 'imageinfo' not in p:
-                continue
-            info = p['imageinfo'][0]
-            if not info.get('mime', '').startswith('image/'):
-                continue
-            filename = p['title'][5:]  # strip "File:"
-            images.append({
-                'filename': filename,
-                'thumb_url': info.get('thumburl', ''),
-                'commons_url': (
-                    f"https://commons.wikimedia.org/wiki/File:"
-                    f"{requests.utils.quote(filename, safe='')}"
-                ),
-            })
-        return images
 
 
 def _strip_html(text: str) -> str:
