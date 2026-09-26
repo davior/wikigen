@@ -676,7 +676,7 @@ let publishedSet = new Set();
 let totalPublished = 0;
 
 let currentPlan = null;          // {plan_id, operation_type, description, steps}
-let isStreaming = false;
+let isPlanning = false;          // currentPlan is still being drafted on the server
 let contextPages = [];           // [{title, content, url}]
 const CONTENT_REQUIRED_TYPES = new Set(['create', 'write', 'edit', 'add_image']);
 const _generatingSteps = new Set();
@@ -1109,10 +1109,11 @@ async function uploadFileToContext(file) {
 let _activePlanId = null;
 
 async function doPlan() {
+  const planBtn = document.getElementById('planBtn');
+  if (planBtn.disabled) return;  // Ctrl+Enter while a plan is still being drafted
   const instruction = document.getElementById('prompt').value.trim();
   if (!instruction) { showToast('Enter an instruction first', 'error'); return; }
 
-  const planBtn = document.getElementById('planBtn');
   planBtn.disabled = true;
 
   showLoading('FETCHING SITE INDEX...', 'Building full wiki context');
@@ -1143,61 +1144,47 @@ async function doPlan() {
     return;
   }
 
-  _activePlanId = data.plan_id;
-  currentPlan = { plan_id: data.plan_id, operation_type: 'auto', description: 'Planning…', steps: [] };
-  isStreaming = true;
+  const planId = data.plan_id;
+  _activePlanId = planId;
+  currentPlan = { plan_id: planId, operation_type: 'auto', description: 'Planning…', steps: [] };
+  isPlanning = true;
   hideLoading();
   switchCentreTab('plan');
   renderPlanView();
   setCancelVisible(true);
 
-  await new Promise((resolve) => {
-    const es = new EventSource(`${API_BASE}/api/agent/plan/stream/${data.plan_id}`);
-    es.onmessage = (e) => {
-      const event = JSON.parse(e.data);
-      if (event.type === 'step') {
-        currentPlan.steps.push(event.step);
-        document.getElementById('totalSteps').textContent = currentPlan.steps.length;
-        appendStepToView(event.step);
-        renderGraph();
-      } else if (event.type === 'plan_complete') {
-        isStreaming = false;
-        currentPlan.description = event.description;
-        currentPlan.steps = event.steps;
-        renderPlanView();
-        showToast(`Plan ready: ${event.steps.length} step${event.steps.length !== 1 ? 's' : ''}`, 'success');
-        loadPlanHistory();
-        es.close();
-        resolve();
-      } else if (event.type === 'error') {
-        es.close();
-        // A reconnect after the plan finished finds no job; the plan itself is saved.
-        if (event.error === 'Job not found') {
-          loadFinishedPlan(data.plan_id).then(resolve);
-          return;
-        }
-        isStreaming = false;
-        currentPlan.description = 'Planning failed';
-        renderPlanView();
-        showToast('Planning error: ' + event.error, 'error');
-        resolve();
-      }
-    };
-    // EventSource reconnects on its own after a dropped connection, and the
-    // server keeps the job queue, so only give up after repeated failures.
-    // Then fall back to fetching the plan, which may already be finished.
-    let errorCount = 0;
-    es.onopen = () => { errorCount = 0; };
-    es.onerror = async () => {
-      if (es.readyState !== EventSource.CLOSED && ++errorCount < 5) return;
-      es.close();
-      await loadFinishedPlan(data.plan_id);
-      resolve();
-    };
-  });
+  // Planning can take minutes, so poll for the finished plan instead of
+  // holding one connection open: if that dropped, the page never found out.
+  let plan;
+  try {
+    plan = await pollJob(`${API_BASE}/api/agent/plan/${encodeURIComponent(planId)}`,
+                         p => p.status === 'running');
+    // The in-progress plan only lives in server memory, so a restart loses it.
+    if (plan.error) plan = { error: 'Planning was interrupted (was the server restarted?)' };
+  } catch (e) {
+    plan = { error: 'Lost contact with WikiGen while planning. If the plan finishes, it will appear under Recent Plans.' };
+  }
 
   setCancelVisible(false);
   planBtn.disabled = false;
+  loadPlanHistory();
+  // The user may have opened another plan meanwhile; this one is in history.
+  if (currentPlan?.plan_id !== planId) return;
+
+  isPlanning = false;
+  const steps = plan.steps || [];
+  if (plan.error || (plan.status === 'failed' && !steps.length)) {
+    currentPlan.description = plan.error || plan.description;
+    renderPlanView();
+    showToast(currentPlan.description, 'error');
+    return;
+  }
+  currentPlan.description = plan.description;
+  currentPlan.steps = steps;
+  document.getElementById('totalSteps').textContent = steps.length;
+  renderPlanView();
+  renderGraph();
+  showToast(`Plan ready: ${steps.length} step${steps.length !== 1 ? 's' : ''}`, 'success');
 }
 
 function loadPlan(data) {
@@ -1207,6 +1194,7 @@ function loadPlan(data) {
   _generatingSteps.clear();
 
   currentPlan = data;
+  isPlanning = false;
   document.getElementById('totalSteps').textContent = (data.steps || []).length;
   switchCentreTab('plan');
   renderPlanView();
@@ -1214,25 +1202,6 @@ function loadPlan(data) {
   showToast(`Plan ready: ${(data.steps || []).length} steps`, 'success');
   loadPlanHistory();
   updateExecuteBtn();
-}
-
-async function loadFinishedPlan(planId) {
-  isStreaming = false;
-  try {
-    const resp = await fetch(`${API_BASE}/api/agent/plan/${planId}`);
-    const plan = await resp.json();
-    if (resp.ok && plan.status !== 'running' && (plan.steps || []).length) {
-      currentPlan.description = plan.description;
-      currentPlan.steps = plan.steps;
-      renderPlanView();
-      showToast(`Plan ready: ${plan.steps.length} step${plan.steps.length !== 1 ? 's' : ''}`, 'success');
-      loadPlanHistory();
-      return;
-    }
-  } catch (e) { /* fall through */ }
-  renderPlanView();
-  showToast('Lost connection while planning. The plan will appear in history when it finishes.', 'error');
-  loadPlanHistory();
 }
 
 function renderPlanView() {
@@ -1244,7 +1213,7 @@ function renderPlanView() {
 
   empty.style.display = 'none';
   header.style.display = 'block';
-  desc.innerHTML = simpleMarkdown(currentPlan.description || '') + (isStreaming ? '<span class="inline-spinner"></span>' : '');
+  desc.innerHTML = simpleMarkdown(currentPlan.description || '') + (isPlanning ? '<span class="inline-spinner"></span>' : '');
 
   list.innerHTML = '';
   (currentPlan.steps || []).forEach(step => {
@@ -1255,15 +1224,6 @@ function renderPlanView() {
     }
   });
   updateExecuteBtn();
-}
-
-function appendStepToView(step) {
-  const empty = document.getElementById('planEmpty');
-  const header = document.getElementById('planHeader');
-  empty.style.display = 'none';
-  header.style.display = 'block';
-  document.getElementById('planDescription').innerHTML = simpleMarkdown(currentPlan.description || 'Planning...') + (isStreaming ? '<span class="inline-spinner"></span>' : '');
-  document.getElementById('stepList').appendChild(buildStepElement(step));
 }
 
 // Generated images are served by WikiGen until they're uploaded; other files
@@ -1547,21 +1507,26 @@ async function generateStepContent(stepId) {
   }
 }
 
-// Poll a background generation until it finishes. Network blips are retried;
-// the job keeps running on the server regardless.
-async function pollStepPreview(planId, stepId, signal) {
+function pollStepPreview(planId, stepId, signal) {
   const url = `${API_BASE}/api/agent/step/preview/status?plan_id=${encodeURIComponent(planId)}&step_id=${encodeURIComponent(stepId)}`;
+  return pollJob(url, status => status.state === 'running', signal);
+}
+
+// Poll a background job's JSON until isRunning() says it has finished, and
+// return that JSON. Network blips are retried; the job keeps running on the
+// server regardless.
+async function pollJob(url, isRunning, signal) {
   let failures = 0;
   while (true) {
     await new Promise((resolve, reject) => {
       const t = setTimeout(resolve, 3000);
-      signal.addEventListener('abort', () => { clearTimeout(t); reject(new DOMException('Aborted', 'AbortError')); }, { once: true });
+      signal?.addEventListener('abort', () => { clearTimeout(t); reject(new DOMException('Aborted', 'AbortError')); }, { once: true });
     });
     try {
       const resp = await fetch(url, { signal });
       const status = await resp.json();
       failures = 0;
-      if (status.state !== 'running') return status;
+      if (!isRunning(status)) return status;
     } catch (err) {
       if (err.name === 'AbortError') throw err;
       if (++failures >= 10) throw err;
@@ -2168,6 +2133,7 @@ function newOperation() {
 
   // Clear plan state
   currentPlan = null;
+  isPlanning = false;
   document.getElementById('planHeader').style.display = 'none';
   document.getElementById('planEmpty').style.display = 'block';
   document.getElementById('stepList').innerHTML = '';

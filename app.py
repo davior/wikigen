@@ -6,7 +6,6 @@ import os
 import queue
 import re
 import threading
-import time
 import uuid
 import dataclasses
 from datetime import datetime, timezone
@@ -46,7 +45,6 @@ anthropic_client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY
 
 _plans: dict[str, OperationPlan] = {}
 _wiki_clients: dict[str, WikiClient] = {}
-_job_queues: dict[str, queue.Queue] = {}      # plan phase 1 SSE queues
 _exec_queues: dict[str, queue.Queue] = {}     # execute phase 2 SSE queues
 _cancel_events: dict[str, threading.Event] = {}
 _preview_jobs: dict[tuple, dict] = {}         # (plan_id, step_id) -> {state, error}
@@ -769,12 +767,11 @@ def agent_plan():
     context_pages = body.get('context_pages', [])
 
     plan_id = str(uuid.uuid4())
-    job_q: queue.Queue = queue.Queue()
-    _job_queues[plan_id] = job_q
-
     cancel_ev = threading.Event()
     _cancel_events[plan_id] = cancel_ev
 
+    # Planning can take minutes, so it runs in the background and the page
+    # polls GET /api/agent/plan/<id> until this placeholder stops 'running'.
     placeholder = OperationPlan(
         id=plan_id,
         operation_type='auto',
@@ -785,76 +782,26 @@ def agent_plan():
     _plans[plan_id] = placeholder
 
     def _worker():
-        index = _site_index(client, conn)
-
-        agent = _make_agent(
-            client, conn, site_index=index, context_pages=context_pages,
-            recent_pages=site_index.get_recent_pages(conn['id']),
-        )
-        agent._stream_callback = lambda evt: job_q.put(evt)
-        agent.cancel_event = cancel_ev
-
         try:
+            index = _site_index(client, conn)
+            agent = _make_agent(
+                client, conn, site_index=index, context_pages=context_pages,
+                recent_pages=site_index.get_recent_pages(conn['id']),
+            )
+            agent.cancel_event = cancel_ev
             plan = agent.generate_plan(instruction)
             plan.id = plan_id
             _attach_uploads_to_plan(plan, context_pages)
-            _plans[plan_id] = plan
-            _save_plan_to_disk(plan)
         except Exception as e:
-            job_q.put({'type': 'error', 'error': str(e)})
+            logging.getLogger(__name__).exception('Planning failed for plan %s', plan_id)
+            plan = dataclasses.replace(placeholder, status='failed', description=f'Planning failed: {e}')
+        if cancel_ev.is_set():
+            return  # cancel_plan already saved the placeholder as cancelled
+        _plans[plan_id] = plan
+        _save_plan_to_disk(plan)
 
     threading.Thread(target=_worker, daemon=True).start()
     return jsonify({'plan_id': plan_id, 'status': 'running'})
-
-
-@app.route('/api/agent/plan/stream/<plan_id>')
-def agent_plan_stream(plan_id: str):
-    def generate():
-        # Send something immediately so headers go out: gunicorn holds them
-        # until the first chunk, and browsers drop a silent EventSource.
-        yield ': connected\n\n'
-
-        job_q = _job_queues.get(plan_id)
-        if not job_q:
-            yield _sse({'type': 'error', 'error': 'Job not found'})
-            return
-
-        while True:
-            try:
-                event = job_q.get(timeout=15)
-            except queue.Empty:
-                yield ': keepalive\n\n'
-                continue
-
-            yield _sse(event)
-
-            if event.get('type') in ('done', 'error'):
-                _job_queues.pop(plan_id, None)
-                # 'done' is emitted from inside generate_plan(), just before the
-                # worker swaps the placeholder for the finished plan.
-                for _ in range(50):
-                    plan = _plans.get(plan_id)
-                    if not plan or plan.status != 'running':
-                        break
-                    time.sleep(0.2)
-                if plan and event.get('type') == 'done':
-                    yield _sse({
-                        'type': 'plan_complete',
-                        'plan_id': plan_id,
-                        'description': plan.description,
-                        'steps': [s.to_dict() for s in plan.steps],
-                    })
-                break
-
-    return Response(
-        stream_with_context(generate()),
-        mimetype='text/event-stream',
-        headers={
-            'X-Accel-Buffering': 'no',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-        },
-    )
 
 
 @app.route('/api/agent/plan/<plan_id>/cancel', methods=['POST'])
@@ -864,6 +811,8 @@ def cancel_plan(plan_id: str):
     _cancel_events[plan_id].set()
     plan = _plans.get(plan_id)
     if plan:
+        if plan.status == 'running':  # still planning; the worker discards its result
+            plan.description = 'Planning cancelled'
         plan.status = 'failed'
         _save_plan_to_disk(plan)
     return jsonify({'success': True})
@@ -1122,7 +1071,9 @@ def execute_plan_route():
 @app.route('/api/agent/execute/stream/<plan_id>')
 def agent_execute_stream(plan_id: str):
     def generate():
-        yield ': connected\n\n'  # flush headers now; see agent_plan_stream
+        # Send something immediately so headers go out: gunicorn holds them
+        # until the first chunk, and browsers drop a silent EventSource.
+        yield ': connected\n\n'
 
         exec_q = _exec_queues.get(plan_id)
         if not exec_q:
