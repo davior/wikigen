@@ -10,7 +10,7 @@ A Flask web application for managing MediaWiki wikis via AI. Enter a natural lan
 
 - **7 operation types** — Generate, Recursive Generate, Edit, Find & Replace, Disambiguate, Rename, Audit
 - **Plan → Review → Execute** — AI builds a step-by-step plan; you approve before anything touches the wiki
-- **Live streaming** — Recursive generation streams steps to the UI in real time via SSE
+- **Live progress** — Execution streams each step's result to the UI in real time via SSE
 - **Multi-wiki support** — Manage multiple MediaWiki instances via the connections manager
 - **Context injection** — Load existing wiki pages as context for more coherent AI generation
 - **Diff viewer** — Coloured before/after diff for Edit and Find & Replace operations
@@ -278,9 +278,8 @@ wikigen/
 
 | Method | Route | Description |
 |---|---|---|
-| `POST` | `/api/agent/plan` | Build an operation plan (returns steps or `{status: "running"}` for recursive) |
-| `GET` | `/api/agent/plan/stream/<plan_id>` | SSE stream for recursive generation progress |
-| `GET` | `/api/agent/plan/<plan_id>` | Fetch a plan by ID |
+| `POST` | `/api/agent/plan` | Start building an operation plan in the background; returns `{plan_id, status: "running"}` |
+| `GET` | `/api/agent/plan/<plan_id>` | Fetch a plan by ID (`status: "running"` while it is still being planned) |
 | `POST` | `/api/agent/execute_step` | Execute a single step |
 | `POST` | `/api/agent/execute_plan` | Execute all approved steps in a plan |
 
@@ -315,7 +314,7 @@ wikigen/
 
 ## Development Notes
 
-- **Recursive generation** is the only async operation — it runs in a background thread and streams steps via Server-Sent Events. All other operations block until complete.
+- **Background jobs** — Planning and step content generation run in background threads, and the page polls for the result every few seconds rather than holding a request open for minutes (a dropped connection would otherwise lose the result). Execution streams its progress via Server-Sent Events.
 - **Rate limiting** — WikiGen enforces a 1-second minimum between wiki write operations to stay within MediaWiki's default bot rate limit.
 - **CSRF tokens** — Automatically refreshed on `badtoken` errors; no manual intervention needed.
 - **Prompt caching** — The Anthropic system prompt uses `cache_control: ephemeral`. The stable blocks (planner rules + site index) are cached for **1 hour**; per-request context keeps the default 5-minute TTL — giving ~90% cost reduction on repeated calls.
