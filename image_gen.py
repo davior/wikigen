@@ -23,6 +23,8 @@ from pathlib import Path
 
 import requests
 
+import keys
+
 log = logging.getLogger(__name__)
 
 FAL_QUEUE_URL = 'https://queue.fal.run'
@@ -214,13 +216,23 @@ def _images_per_page(value) -> int:
         return DEFAULT_IMAGES_PER_PAGE
 
 
+def fal_key_for(conn: dict) -> tuple[str, str]:
+    """The fal.ai key a connection uses and where it comes from; ('', '') if it has none."""
+    if (conn.get('fal_key') or '').strip():
+        return conn['fal_key'].strip(), 'the connection settings'
+    if (os.environ.get('FAL_KEY') or '').strip():
+        return os.environ['FAL_KEY'].strip(), 'FAL_KEY in .env'
+    return '', ''
+
+
 def from_connection(conn: dict) -> 'FalImageGenerator | None':
     """The connection's image generator, or None when no fal.ai key is configured."""
-    key = (conn.get('fal_key') or os.environ.get('FAL_KEY') or '').strip()
+    key, source = fal_key_for(conn)
     if not key:
         return None
     return FalImageGenerator(
         key,
+        key_source=source,
         model=conn.get('image_model'),
         params=parse_params(conn.get('image_params')),
         style=conn.get('image_style') or '',
@@ -228,7 +240,7 @@ def from_connection(conn: dict) -> 'FalImageGenerator | None':
     )
 
 
-def _fal_error(resp: requests.Response, stage: str) -> ImageGenError:
+def _fal_error(resp: requests.Response, stage: str, key: str = '', key_source: str = '') -> ImageGenError:
     try:
         body = resp.json()
     except ValueError:
@@ -241,8 +253,13 @@ def _fal_error(resp: requests.Response, stage: str) -> ImageGenError:
             f"{'.'.join(str(p) for p in d.get('loc', [])[1:]) or 'input'}: {d.get('msg')}"
             if isinstance(d, dict) else str(d) for d in detail)
     hint = ''
-    if resp.status_code in (401, 403):
-        hint = ' (check the fal.ai key in the connection settings)'
+    if resp.status_code == 401:
+        hint = (f' (fal.ai rejected the key {keys.mask_key(key)} from {key_source}; compare it with '
+                'fal.ai → Dashboard → Keys)')
+    elif resp.status_code == 403:
+        hint = (f' (fal.ai refused the account behind key {keys.mask_key(key)} from {key_source}: '
+                'usually an exhausted balance or locked account, see fal.ai → Dashboard → Billing, '
+                'rather than a bad key)')
     elif resp.status_code == 404:
         hint = ' (check the model ID in the connection settings)'
     return ImageGenError(f'fal.ai {stage} failed ({resp.status_code}): {str(detail)[:300]}{hint}')
@@ -250,8 +267,10 @@ def _fal_error(resp: requests.Response, stage: str) -> ImageGenError:
 
 class FalImageGenerator:
     def __init__(self, api_key: str, model: str | None = None, params: dict | None = None,
-                 style: str = '', images_per_page: int = DEFAULT_IMAGES_PER_PAGE):
+                 style: str = '', images_per_page: int = DEFAULT_IMAGES_PER_PAGE,
+                 key_source: str = 'the connection settings'):
         self.api_key = api_key
+        self.key_source = key_source
         self.model = (model or DEFAULT_MODEL).strip().strip('/')
         self.params = dict(DEFAULT_PARAMS) if params is None else dict(params)
         self.style = (style or '').strip()
@@ -264,7 +283,7 @@ class FalImageGenerator:
         try:
             r = requests.post(f'{FAL_QUEUE_URL}/{self.model}', json=payload, headers=headers, timeout=30)
             if not r.ok:
-                raise _fal_error(r, 'request')
+                raise _fal_error(r, 'request', self.api_key, self.key_source)
             job = r.json()
             status_url, response_url = job.get('status_url'), job.get('response_url')
             if not status_url or not response_url:
@@ -274,7 +293,7 @@ class FalImageGenerator:
             while True:
                 s = requests.get(status_url, headers=headers, timeout=30)
                 if not s.ok:
-                    raise _fal_error(s, 'status check')
+                    raise _fal_error(s, 'status check', self.api_key, self.key_source)
                 status = s.json()
                 if status.get('error'):
                     raise ImageGenError(f'fal.ai generation failed: {str(status["error"])[:300]}')
@@ -291,7 +310,7 @@ class FalImageGenerator:
 
             res = requests.get(response_url, headers=headers, timeout=60)
             if not res.ok:
-                raise _fal_error(res, 'generation')
+                raise _fal_error(res, 'generation', self.api_key, self.key_source)
             return self._image_from_result(res.json())
         except requests.RequestException as e:
             raise ImageGenError(f'Could not reach fal.ai: {e}') from e

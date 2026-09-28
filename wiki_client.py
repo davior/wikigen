@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import threading
 import time
 import requests
 
@@ -16,6 +17,14 @@ def _short_reason(exc: Exception) -> str:
         if marker in msg:
             return marker
     return msg[:200]
+
+
+# How long a confirmed login is trusted before a write checks it again.
+SESSION_CHECK_INTERVAL = 300
+
+# API errors meaning the wiki no longer treats us as logged in.
+_SESSION_ERRORS = ('assertuserfailed', 'assertnameduserfailed', 'badtoken', 'notloggedin',
+                   'mustbeloggedin', 'permissiondenied')
 
 
 class _TimeoutSession(requests.Session):
@@ -46,13 +55,62 @@ class WikiClient:
         self._connected = False
         self._last_write_time = 0.0
         self.last_error: str | None = None
+        # Steps run in parallel on one client; one login at a time, or they undo each other's.
+        self._login_lock = threading.RLock()
+        self._logins = 0                 # bumped by every login, so a thread can tell someone else redid it
+        self._session_checked_at = 0.0   # monotonic time the wiki last confirmed we're logged in
 
     def connect(self) -> bool:
-        self.last_error = self._login()
-        self._connected = self.last_error is None
+        with self._login_lock:
+            self.last_error = self._login()
+            self._connected = self.last_error is None
+            self._logins += 1
+            self._session_checked_at = time.monotonic() if self._connected else 0.0
         if self.last_error:
             log.warning('Wiki connection to %s failed: %s', self._url, self.last_error)
         return self._connected
+
+    def ensure_logged_in(self) -> bool:
+        """Make sure the wiki still has us logged in, logging in again if it dropped the session.
+
+        MediaWiki expires idle sessions (an hour by default) and forgets them when
+        its cache restarts. Reads still work logged out, so a plan succeeds and
+        the step's writes then fail, until the next login.
+        """
+        if self._connected and time.monotonic() - self._session_checked_at < SESSION_CHECK_INTERVAL:
+            return True
+        return self._check_session()
+
+    def keep_alive(self) -> None:
+        """Touch the session so the wiki doesn't expire it while idle; log in again if it already has.
+
+        Skips a client whose login failed: retrying a bad password on a timer
+        would trip the wiki's login throttle. Its next use logs in again.
+        """
+        if self._connected:
+            self._check_session()
+
+    def _check_session(self) -> bool:
+        """Ask the wiki whether we're logged in (which also keeps the session alive); log in if not."""
+        logins = self._logins
+        if self._connected and self._logged_in_as():
+            self._session_checked_at = time.monotonic()
+            return True
+        log.info('Not logged in to %s (the session expired or never started); logging in', self._url)
+        self._reconnect(logins)
+        return self._connected
+
+    def _logged_in_as(self) -> str | None:
+        """The user name the wiki has this session logged in as, or None if anonymous."""
+        try:
+            r = self._session.get(self._url, params={
+                'action': 'query', 'meta': 'userinfo', 'format': 'json'
+            }, timeout=15)
+            r.raise_for_status()
+            info = r.json()['query']['userinfo']
+        except Exception:
+            return None
+        return None if 'anon' in info else info.get('name')
 
     def _login(self) -> str | None:
         """Log in and fetch a CSRF token. Returns None on success, else a readable reason."""
@@ -249,147 +307,91 @@ class WikiClient:
         results = r.json().get('query', {}).get('search', [])
         return [{'title': r['title'], 'snippet': _strip_html(r.get('snippet', ''))} for r in results]
 
-    def _reconnect(self):
-        self._connected = False
-        self._csrf_token = None
-        self.connect()
+    def _reconnect(self, logins: int | None = None):
+        """Log in again, unless another thread already has since it saw `logins` logins."""
+        with self._login_lock:
+            if logins is not None and logins != self._logins and self._connected:
+                return
+            self._connected = False
+            self._csrf_token = None
+            self.connect()
+
+    def _post_write(self, action: str, data: dict, succeeded, files=None) -> dict:
+        """POST a write as the logged-in user; if the wiki dropped the session, log in and retry once.
+
+        `assert=user` makes the wiki refuse the write instead of making it anonymously.
+        """
+        for attempt in range(2):
+            self.ensure_logged_in()
+            logins = self._logins
+            self._ensure_csrf()
+            self._rate_limit()
+            r = self._session.post(self._url, data={
+                **data, 'token': self._csrf_token, 'assert': 'user', 'format': 'json',
+            }, files=files)
+            r.raise_for_status()
+            result = r.json()
+            if succeeded(result):
+                self._session_checked_at = time.monotonic()
+                return {'success': True}
+            code = (result.get('error') or {}).get('code', '')
+            if code in _SESSION_ERRORS and attempt == 0:
+                log.info('Wiki %s got "%s"; logging in again and retrying', action, code)
+                self._reconnect(logins)
+                continue
+            if not self._connected:
+                return {'success': False, 'error': f'Wiki login failed: {self.last_error}'}
+            return {'success': False, 'error': str(result)}
 
     def write_page(self, title: str, content: str, summary: str = '') -> dict:
-        for _attempt in range(2):
-            self._ensure_csrf()
-            self._rate_limit()
-            r = self._session.post(self._url, data={
-                'action': 'edit',
-                'title': title,
-                'text': content,
-                'summary': summary,
-                'bot': '1',
-                'token': self._csrf_token,
-                'format': 'json',
-            })
-            r.raise_for_status()
-            data = r.json()
-            if data.get('edit', {}).get('result') == 'Success':
-                return {'success': True}
-            err = str(data)
-            if 'badtoken' in err:
-                self._csrf_token = self._fetch_csrf()
-                continue
-            if 'permissiondenied' in err:
-                self._reconnect()
-                continue
-            return {'success': False, 'error': err}
-        return {'success': False, 'error': 'write_page failed after reconnect'}
+        return self._post_write('edit', {
+            'action': 'edit',
+            'title': title,
+            'text': content,
+            'summary': summary,
+            'bot': '1',
+        }, lambda d: d.get('edit', {}).get('result') == 'Success')
 
     def move_page(self, from_title: str, to_title: str, reason: str = '') -> dict:
-        for _attempt in range(2):
-            self._ensure_csrf()
-            self._rate_limit()
-            r = self._session.post(self._url, data={
-                'action': 'move',
-                'from': from_title,
-                'to': to_title,
-                'reason': reason,
-                'movetalk': '1',
-                'token': self._csrf_token,
-                'format': 'json',
-            })
-            r.raise_for_status()
-            data = r.json()
-            if 'move' in data:
-                return {'success': True}
-            err = str(data)
-            if 'badtoken' in err:
-                self._csrf_token = self._fetch_csrf()
-                continue
-            if 'permissiondenied' in err:
-                self._reconnect()
-                continue
-            return {'success': False, 'error': err}
-        return {'success': False, 'error': 'move_page failed after reconnect'}
+        return self._post_write('move', {
+            'action': 'move',
+            'from': from_title,
+            'to': to_title,
+            'reason': reason,
+            'movetalk': '1',
+        }, lambda d: 'move' in d)
 
     def delete_page(self, title: str, reason: str = '') -> dict:
-        for _attempt in range(2):
-            self._ensure_csrf()
-            self._rate_limit()
-            r = self._session.post(self._url, data={
-                'action': 'delete',
-                'title': title,
-                'reason': reason,
-                'token': self._csrf_token,
-                'format': 'json',
-            })
-            r.raise_for_status()
-            data = r.json()
-            if 'delete' in data:
-                return {'success': True}
-            err = str(data)
-            if 'badtoken' in err:
-                self._csrf_token = self._fetch_csrf()
-                continue
-            if 'permissiondenied' in err:
-                self._reconnect()
-                continue
-            return {'success': False, 'error': err}
-        return {'success': False, 'error': 'delete_page failed after reconnect'}
+        return self._post_write('delete', {
+            'action': 'delete',
+            'title': title,
+            'reason': reason,
+        }, lambda d: 'delete' in d)
 
     def upload_file(self, filename: str, file_data: bytes, mime_type: str = 'application/octet-stream',
                     description: str = '', comment: str | None = None) -> dict:
         """Upload a file. `description` is the file page text; `comment` the log entry (defaults to it)."""
-        for _attempt in range(2):
-            self._ensure_csrf()
-            self._rate_limit()
-            r = self._session.post(self._url, data={
-                'action': 'upload',
-                'filename': filename,
-                'comment': comment or description,
-                'text': description,
-                'token': self._csrf_token,
-                'format': 'json',
-                'ignorewarnings': '1',
-            }, files={'file': (filename, file_data, mime_type)})
-            r.raise_for_status()
-            data = r.json()
-            if data.get('upload', {}).get('result') in ('Success', 'Warning'):
-                return {'success': True, 'filename': filename}
-            err = str(data)
-            if 'badtoken' in err:
-                self._csrf_token = self._fetch_csrf()
-                continue
-            if 'permissiondenied' in err:
-                self._reconnect()
-                continue
-            return {'success': False, 'error': err}
-        return {'success': False, 'error': 'upload_file failed after reconnect'}
+        result = self._post_write('upload', {
+            'action': 'upload',
+            'filename': filename,
+            'comment': comment or description,
+            'text': description,
+            'ignorewarnings': '1',
+        }, lambda d: d.get('upload', {}).get('result') in ('Success', 'Warning'),
+            files={'file': (filename, file_data, mime_type)})
+        return {**result, 'filename': filename} if result['success'] else result
 
     def upload_file_from_url(self, filename: str, url: str, description: str = '') -> dict:
-        for _attempt in range(2):
-            self._ensure_csrf()
-            self._rate_limit()
-            r = self._session.post(self._url, data={
-                'action': 'upload',
-                'filename': filename,
-                'url': url,
-                'comment': description,
-                'text': description,
-                'token': self._csrf_token,
-                'format': 'json',
-                'ignorewarnings': '1',
-            })
-            r.raise_for_status()
-            data = r.json()
-            if data.get('upload', {}).get('result') in ('Success', 'Warning'):
-                return {'success': True, 'filename': filename}
-            err = str(data)
-            if 'badtoken' in err:
-                self._csrf_token = self._fetch_csrf()
-                continue
-            if 'permissiondenied' in err:
-                self._reconnect()
-                continue
-            # MediaWiki may disallow remote URL uploads; return clear error
-            return {'success': False, 'error': err}
-        return {'success': False, 'error': 'upload_file_from_url failed after reconnect'}
+        # MediaWiki may disallow remote URL uploads; its error is returned as is.
+        result = self._post_write('upload', {
+            'action': 'upload',
+            'filename': filename,
+            'url': url,
+            'comment': description,
+            'text': description,
+            'ignorewarnings': '1',
+        }, lambda d: d.get('upload', {}).get('result') in ('Success', 'Warning'))
+        return {**result, 'filename': filename} if result['success'] else result
 
     def get_links_from_page(self, title: str) -> list[str]:
         """Get main-namespace [[wikilinks]] from a saved page via the API."""
