@@ -6,6 +6,7 @@ import os
 import queue
 import re
 import threading
+import time
 import uuid
 import dataclasses
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from flask import (Flask, Response, jsonify, redirect, render_template, request,
 from flask_cors import CORS
 
 import image_gen
+import keys
 import site_index
 from agent import OperationPlan, OperationStep, WikiAgent, _make_diff
 from wiki_client import WikiClient
@@ -41,7 +43,8 @@ UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 site_index.set_storage_dir(DATA_DIR)
 image_gen.set_storage_dir(DATA_DIR)
 
-anthropic_client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY', ''))
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 _plans: dict[str, OperationPlan] = {}
 _wiki_clients: dict[str, WikiClient] = {}
@@ -50,7 +53,8 @@ _cancel_events: dict[str, threading.Event] = {}
 _preview_jobs: dict[tuple, dict] = {}         # (plan_id, step_id) -> {state, error}
 _preview_jobs_lock = threading.Lock()
 _plan_save_lock = threading.Lock()
-_connections_lock = threading.Lock()
+# Held around every read-modify-write of connections.json, so two saves can't undo each other.
+_connections_lock = threading.RLock()
 
 # Connection fields never sent back to the browser; an empty value on update keeps the old one.
 _SECRET_FIELDS = ('password', 'fal_key', 'api_token')
@@ -83,7 +87,11 @@ def _load_connections() -> dict:
 
 
 def _save_connections(data: dict):
-    CONNECTIONS_FILE.write_text(json.dumps(data, indent=2))
+    # Write a temp file and rename it over the old one, so a restart mid-write
+    # (e.g. a Watchtower update) can't leave connections.json truncated.
+    tmp = CONNECTIONS_FILE.with_name(f'{CONNECTIONS_FILE.name}.{uuid.uuid4().hex}.tmp')
+    tmp.write_text(json.dumps(data, indent=2))
+    os.replace(tmp, CONNECTIONS_FILE)
 
 
 def _get_active_connection() -> dict | None:
@@ -110,7 +118,30 @@ def _public_connection(conn: dict) -> dict:
     public = {k: v for k, v in conn.items() if k not in _SECRET_FIELDS}
     for key in _SECRET_FIELDS:
         public[f'has_{key}'] = bool(conn.get(key))
+    # Which fal.ai key is saved, to compare with fal.ai's dashboard without re-entering it.
+    public['fal_key_hint'] = keys.mask_key(conn['fal_key']) if conn.get('fal_key') else ''
     return public
+
+
+def _preflight(conn: dict, client: WikiClient | None, need_images: bool = False) -> str | None:
+    """Why the keys the work needs aren't usable, checked before it starts; None if they are."""
+    if not ANTHROPIC_API_KEY.strip():
+        return 'ANTHROPIC_API_KEY is not set in .env. Add it, then rebuild the container.'
+    fal_key, source = image_gen.fal_key_for(conn)
+    if fal_key:
+        if problem := keys.fal_key_problem(fal_key, conn.get('password')):
+            return (f'The fal.ai key in {source} ({keys.mask_key(fal_key)}) is unusable: {problem}. '
+                    'Re-enter it in Connections → Edit.')
+    elif need_images:
+        return 'This connection has no fal.ai key. Add one in Connections → Edit to generate images.'
+    if not client:
+        return 'Connection not found'
+    if not client.ensure_logged_in():
+        reason = (client.last_error or 'unknown error').rstrip('.')
+        if problem := keys.wiki_password_problem(conn.get('password') or ''):
+            reason += f' (the saved wiki password is unusable: {problem})'
+        return f'Wiki login failed: {reason}. Check the bot password in Connections → Edit.'
+    return None
 
 
 class _ImageStyleStore:
@@ -155,6 +186,29 @@ def get_wiki_client(connection_id: str) -> WikiClient | None:
     client.connect()
     _wiki_clients[connection_id] = client
     return client
+
+
+def _wiki_keepalive_seconds() -> float:
+    try:
+        return max(0.0, float(os.environ.get('WIKI_KEEPALIVE_MINUTES', 10))) * 60
+    except ValueError:
+        return 600.0
+
+
+def _keep_wiki_sessions_alive(interval: float):
+    """Touch every wiki login in use now and then, so the wikis don't expire them while WikiGen sits idle."""
+    while True:
+        time.sleep(interval)
+        for conn_id, client in list(_wiki_clients.items()):
+            try:
+                client.keep_alive()
+            except Exception:
+                logging.getLogger(__name__).exception('Wiki keep-alive failed for connection %s', conn_id)
+
+
+if _wiki_keepalive_seconds():
+    threading.Thread(target=_keep_wiki_sessions_alive, args=(_wiki_keepalive_seconds(),),
+                     name='wiki-keepalive', daemon=True).start()
 
 
 def _site_index(client: WikiClient, conn: dict) -> dict:
@@ -353,10 +407,33 @@ def list_connections():
     return jsonify({**data, 'connections': [_public_connection(c) for c in data.get('connections', [])]})
 
 
+def _check_secrets(body: dict, conn: dict | None = None) -> str | None:
+    """Why a fal.ai key or wiki password being saved is unusable, or None. Strips the key in place."""
+    body['fal_key'] = str(body.get('fal_key') or '').strip()
+    autofill = ' If a browser or password manager filled the field, clear it and save again.'
+    if body['fal_key']:
+        password = body.get('password') or (conn or {}).get('password')
+        if problem := keys.fal_key_problem(body['fal_key'], password):
+            return f'That fal.ai key is unusable: {problem}.{autofill}'
+    if body.get('password'):
+        if problem := keys.wiki_password_problem(body['password']):
+            return f'That wiki password is unusable: {problem}.{autofill}'
+    return None
+
+
+def _stamp_secrets(conn: dict, body: dict):
+    """Record when each secret was last saved, to tell whether it changed since it last worked."""
+    now = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    for key in _SECRET_FIELDS:
+        if body.get(key):
+            conn[f'{key}_saved_at'] = now
+
+
 @app.route('/api/connections', methods=['POST'])
 def add_connection():
     body = request.json or {}
-    data = _load_connections()
+    if problem := _check_secrets(body):
+        return jsonify({'error': problem}), 400
     conn = {
         'id': str(uuid.uuid4()),
         'name': body.get('name', 'New Wiki'),
@@ -372,45 +449,54 @@ def add_connection():
         'images_per_page': body.get('images_per_page', image_gen.DEFAULT_IMAGES_PER_PAGE),
         'image_style': body.get('image_style', ''),
     }
-    data['connections'].append(conn)
-    if not data.get('active_connection_id'):
-        data['active_connection_id'] = conn['id']
-    _save_connections(data)
+    _stamp_secrets(conn, body)
+    with _connections_lock:
+        data = _load_connections()
+        data['connections'].append(conn)
+        if not data.get('active_connection_id'):
+            data['active_connection_id'] = conn['id']
+        _save_connections(data)
     return jsonify({'success': True, 'connection': _public_connection(conn)})
 
 
 @app.route('/api/connections/<conn_id>', methods=['PUT'])
 def update_connection(conn_id: str):
     body = request.json or {}
-    data = _load_connections()
-    for conn in data['connections']:
-        if conn['id'] == conn_id:
-            conn.update({k: v for k, v in body.items()
-                         if k != 'id' and not k.startswith('has_') and not (k in _SECRET_FIELDS and not v)})
-            _wiki_clients.pop(conn_id, None)
-            _save_connections(data)
-            return jsonify({'success': True, 'connection': _public_connection(conn)})
+    with _connections_lock:
+        data = _load_connections()
+        for conn in data['connections']:
+            if conn['id'] == conn_id:
+                if problem := _check_secrets(body, conn):
+                    return jsonify({'error': problem}), 400
+                conn.update({k: v for k, v in body.items()
+                             if k != 'id' and not k.startswith('has_') and not (k in _SECRET_FIELDS and not v)})
+                _stamp_secrets(conn, body)
+                _wiki_clients.pop(conn_id, None)
+                _save_connections(data)
+                return jsonify({'success': True, 'connection': _public_connection(conn)})
     return jsonify({'error': 'Not found'}), 404
 
 
 @app.route('/api/connections/<conn_id>', methods=['DELETE'])
 def delete_connection(conn_id: str):
-    data = _load_connections()
-    data['connections'] = [c for c in data['connections'] if c['id'] != conn_id]
-    if data.get('active_connection_id') == conn_id:
-        data['active_connection_id'] = data['connections'][0]['id'] if data['connections'] else None
-    _wiki_clients.pop(conn_id, None)
-    _save_connections(data)
+    with _connections_lock:
+        data = _load_connections()
+        data['connections'] = [c for c in data['connections'] if c['id'] != conn_id]
+        if data.get('active_connection_id') == conn_id:
+            data['active_connection_id'] = data['connections'][0]['id'] if data['connections'] else None
+        _wiki_clients.pop(conn_id, None)
+        _save_connections(data)
     return jsonify({'success': True})
 
 
 @app.route('/api/connections/<conn_id>/activate', methods=['POST'])
 def activate_connection(conn_id: str):
-    data = _load_connections()
-    if not any(c['id'] == conn_id for c in data['connections']):
-        return jsonify({'error': 'Not found'}), 404
-    data['active_connection_id'] = conn_id
-    _save_connections(data)
+    with _connections_lock:
+        data = _load_connections()
+        if not any(c['id'] == conn_id for c in data['connections']):
+            return jsonify({'error': 'Not found'}), 404
+        data['active_connection_id'] = conn_id
+        _save_connections(data)
     return jsonify({'success': True})
 
 
@@ -420,7 +506,7 @@ def test_connection(conn_id: str):
     client = get_wiki_client(conn_id)
     if client and client._connected:
         return jsonify({'connected': True})
-    return jsonify({'connected': False, 'error': 'Authentication failed'})
+    return jsonify({'connected': False, 'error': (client and client.last_error) or 'Connection not found'})
 
 
 @app.route('/api/connections/<conn_id>/index/status', methods=['GET'])
@@ -492,6 +578,8 @@ def publish():
     client = get_wiki_client(conn['id'])
     if not client:
         return jsonify({'error': 'Wiki connection failed'}), 500
+    if problem := _preflight(conn, client):
+        return jsonify({'success': False, 'error': problem}), 400
     try:
         image_gen.upload_generated_refs(client, body['content'])
     except Exception as e:
@@ -578,6 +666,9 @@ def wiki_rewrite():
     if not client:
         return jsonify({'error': 'Wiki connection failed'}), 500
 
+    if problem := _preflight(conn, client):
+        return jsonify({'error': problem}), 400
+
     if use_plan_scope and plan_id and plan_id in _plans:
         plan = _plans[plan_id]
         index = {step.title: [] for step in plan.steps}
@@ -613,6 +704,8 @@ def wiki_generate_images():
     client = get_wiki_client(conn['id'])
     if not client:
         return jsonify({'error': 'Wiki connection failed'}), 500
+    if problem := _preflight(conn, client, need_images=True):
+        return jsonify({'error': problem}), 400
 
     agent = _make_agent(client, conn, site_index=_site_index(client, conn),
                         recent_pages=site_index.get_recent_pages(conn['id']))
@@ -763,6 +856,8 @@ def agent_plan():
     client = get_wiki_client(conn['id'])
     if not client:
         return jsonify({'error': 'Wiki connection failed'}), 500
+    if problem := _preflight(conn, client):
+        return jsonify({'error': problem}), 400
 
     context_pages = body.get('context_pages', [])
 
@@ -905,6 +1000,9 @@ def step_preview_route():
     conn = _get_connection_by_id(plan.connection_id)
     if not conn:
         return jsonify({'error': 'Connection not found'}), 400
+    client = get_wiki_client(conn['id'])
+    if problem := _preflight(conn, client, need_images=step.type == 'add_image'):
+        return jsonify({'error': problem}), 400
 
     key = (plan_id, step_id)
     with _preview_jobs_lock:
@@ -914,7 +1012,6 @@ def step_preview_route():
 
     def worker():
         try:
-            client = get_wiki_client(conn['id'])
             agent = _make_agent(
                 client, conn, site_index=_site_index(client, conn),
                 recent_pages=site_index.get_recent_pages(conn['id']),
@@ -1004,6 +1101,9 @@ def execute_step_route():
     if not client:
         return jsonify({'error': 'Wiki connection failed'}), 500
 
+    if problem := _preflight(conn, client, need_images=step.type == 'add_image'):
+        return jsonify({'error': problem}), 400
+
     step.status = 'approved'
     agent = _make_agent(client, conn, uploads_dir=UPLOADS_DIR)
     result = agent.execute_step(step)
@@ -1029,6 +1129,9 @@ def execute_plan_route():
     client = get_wiki_client(conn['id'])
     if not client:
         return jsonify({'error': 'Wiki connection failed'}), 500
+    needs_images = any(s.type == 'add_image' for s in plan.steps if s.id in approved_ids)
+    if problem := _preflight(conn, client, need_images=needs_images):
+        return jsonify({'error': problem}), 400
 
     # Mark approved steps
     for step in plan.steps:

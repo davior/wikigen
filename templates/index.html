@@ -312,6 +312,7 @@ textarea#prompt::placeholder { color: var(--text3); }
 .form-label { font-size: 10px; font-family: 'IBM Plex Mono', monospace; color: var(--text3); letter-spacing: 1px; margin-bottom: 5px; display: block; text-transform: uppercase; }
 .form-input, .form-textarea { width: 100%; background: var(--bg3); border: 1px solid var(--border2); border-radius: 3px; color: var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 11px; padding: 8px 10px; outline: none; transition: border-color 0.2s; }
 .form-input:focus, .form-textarea:focus { border-color: var(--accent); }
+.masked-input { -webkit-text-security: disc; }
 .form-textarea { resize: vertical; min-height: 80px; line-height: 1.5; }
 .form-hint { font-size: 9px; font-family: 'IBM Plex Mono', monospace; color: var(--text3); margin-top: 4px; }
 
@@ -610,12 +611,12 @@ textarea#prompt::placeholder { color: var(--text3); }
       </div>
       <div class="form-group">
         <label class="form-label">Username / Bot Password Name</label>
-        <input class="form-input" id="connFormUsername" placeholder="Username@BotPasswordName">
+        <input class="form-input" id="connFormUsername" placeholder="Username@BotPasswordName" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-protonpass-ignore="true">
         <div class="form-hint">Use Special:BotPasswords for bot accounts</div>
       </div>
       <div class="form-group">
         <label class="form-label">Password</label>
-        <input class="form-input" type="password" id="connFormPassword" placeholder="Leave blank to keep existing password">
+        <input class="form-input" type="password" id="connFormPassword" placeholder="Leave blank to keep existing password" autocomplete="new-password" data-1p-ignore data-lpignore="true" data-bwignore data-protonpass-ignore="true">
       </div>
       <div class="form-group">
         <label class="form-label">System Prompt (wiki context for AI)</label>
@@ -629,7 +630,9 @@ textarea#prompt::placeholder { color: var(--text3); }
       <div class="form-section-title">// IMAGE GENERATION (FAL.AI)</div>
       <div class="form-group">
         <label class="form-label">fal.ai API Key</label>
-        <input class="form-input" type="password" id="connFormFalKey" placeholder="Leave blank to keep existing key" autocomplete="off">
+        <!-- Not type="password": browsers and password managers fill password fields with a saved
+             login whatever autocomplete says, which would overwrite the saved key on SAVE. -->
+        <input class="form-input masked-input" type="text" id="connFormFalKey" placeholder="Leave blank to keep existing key" autocomplete="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-protonpass-ignore="true">
         <div class="form-hint" id="connFormFalKeyHint">Get one at fal.ai → Dashboard → Keys. Without a key, pages are written without images.</div>
       </div>
       <div class="form-row">
@@ -831,13 +834,14 @@ const FAL_MODEL_PRESETS = {
   'fal-ai/nano-banana': { aspect_ratio: '4:3' },
 };
 const FAL_KEY_HINT = 'Get one at fal.ai → Dashboard → Keys. Without a key, pages are written without images.';
+const savedOn = at => at ? `, saved ${new Date(at).toLocaleString()}` : '';
 
 function fillImageSettings(conn) {
   document.getElementById('falModelPresets').innerHTML =
     Object.keys(FAL_MODEL_PRESETS).map(m => `<option value="${m}">`).join('');
   document.getElementById('connFormFalKey').value = '';
   document.getElementById('connFormFalKeyHint').textContent = conn.has_fal_key
-    ? 'A key is saved. Leave blank to keep it.' : FAL_KEY_HINT;
+    ? `Saved key: ${conn.fal_key_hint}${savedOn(conn.fal_key_saved_at)}. Leave blank to keep it.` : FAL_KEY_HINT;
   document.getElementById('connFormImageModel').value = conn.image_model || '';
   document.getElementById('connFormImagesPerPage').value = conn.images_per_page ?? '';
   const params = conn.image_params;
@@ -890,6 +894,8 @@ function editConn(id) {
   document.getElementById('connFormUrl').value = conn.wiki_url || '';
   document.getElementById('connFormUsername').value = conn.username || '';
   document.getElementById('connFormPassword').value = '';
+  document.getElementById('connFormPassword').placeholder =
+    `Leave blank to keep existing password${savedOn(conn.password_saved_at)}`;
   document.getElementById('connFormSystemPrompt').value = conn.system_prompt || '';
   document.getElementById('connFormChips').value = (conn.chips || []).join(', ');
   fillImageSettings(conn);
@@ -909,6 +915,7 @@ function showAddConnectionForm() {
   document.getElementById('connFormUrl').value = '';
   document.getElementById('connFormUsername').value = '';
   document.getElementById('connFormPassword').value = '';
+  document.getElementById('connFormPassword').placeholder = 'Leave blank to keep existing password';
   document.getElementById('connFormSystemPrompt').value = '';
   document.getElementById('connFormChips').value = '';
   fillImageSettings({});
