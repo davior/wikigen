@@ -570,7 +570,7 @@ textarea#prompt::placeholder { color: var(--text3); }
   <div class="loading-box">
     <div class="spinner"></div>
     <div class="loading-text" id="loadingText">PLANNING...</div>
-    <div class="loading-sub" id="loadingSub">Calling Anthropic API</div>
+    <div class="loading-sub" id="loadingSub">Calling AI model</div>
   </div>
 </div>
 
@@ -625,6 +625,37 @@ textarea#prompt::placeholder { color: var(--text3); }
       <div class="form-group">
         <label class="form-label">Quick Prompt Chips (comma separated)</label>
         <input class="form-input" id="connFormChips" placeholder="Transhumanism, DEWs, TI Program">
+      </div>
+
+      <div class="form-section-title">// AI MODEL</div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Provider</label>
+          <select class="form-input" id="connFormAiProvider" onchange="onAiProviderChange()">
+            <option value="anthropic">Claude (Anthropic)</option>
+            <option value="deepseek">DeepSeek</option>
+          </select>
+        </div>
+        <div class="form-group deepseek-only">
+          <label class="form-label">Model</label>
+          <input class="form-input" id="connFormDeepseekModel" list="deepseekModelPresets" placeholder="deepseek-v4-pro" autocomplete="off" spellcheck="false">
+          <datalist id="deepseekModelPresets"></datalist>
+        </div>
+        <div class="form-group deepseek-only" style="flex:0 0 130px">
+          <label class="form-label">Reasoning effort</label>
+          <select class="form-input" id="connFormDeepseekEffort">
+            <option value="low">low</option>
+            <option value="high">high</option>
+            <option value="max">max</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-hint" id="connFormAiHint" style="margin:-8px 0 14px"></div>
+      <div class="form-group">
+        <label class="form-label" id="connFormAiKeyLabel">API key</label>
+        <!-- Not type="password", like the fal.ai key below. -->
+        <input class="form-input masked-input" type="text" id="connFormAiKey" placeholder="Leave blank to keep existing key" autocomplete="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-protonpass-ignore="true">
+        <div class="form-hint" id="connFormAiKeyHint"></div>
       </div>
 
       <div class="form-section-title">// IMAGE GENERATION (FAL.AI)</div>
@@ -754,6 +785,7 @@ function openConnectionsModal() {
     .then(data => {
       connections = data.connections || [];
       activeConnectionId = data.active_connection_id;
+      aiMeta = { ai_env_keys: data.ai_env_keys || {}, deepseek_models: data.deepseek_models || [] };
       renderConnectionsModal();
       document.getElementById('connectionsModal').classList.add('active');
     });
@@ -777,6 +809,7 @@ function renderConnectionsModal() {
       <div style="flex:1">
         <div class="conn-name">${escapeHtml(c.name)}</div>
         <div class="conn-url">${escapeHtml(c.wiki_url)}</div>
+        <div class="conn-url">${escapeHtml(c.ai_label || '')}${c.ai_key_missing ? ' · <span style="color:var(--warn)">⚠ no API key</span>' : ''}</div>
         <div class="conn-index" id="connIndex-${c.id}" style="font-size:9px;color:var(--text3);font-family:'IBM Plex Mono',monospace;margin-top:2px"></div>
       </div>
       ${!isActive ? `<button class="step-btn step-btn-approve" onclick="activateConn('${c.id}')">ACTIVATE</button>` : '<span style="font-size:9px;color:var(--accent3);font-family:\'IBM Plex Mono\',monospace">ACTIVE</span>'}
@@ -836,12 +869,38 @@ const FAL_MODEL_PRESETS = {
 const FAL_KEY_HINT = 'Get one at fal.ai → Dashboard → Keys. Without a key, pages are written without images.';
 const savedOn = at => at ? `, saved ${new Date(at).toLocaleString()}` : '';
 
+// Saved keys to remove on SAVE ('fal_key', 'anthropic_key', 'deepseek_key').
+let secretsToClear = new Set();
+
+// The hint under a key field: the saved key (masked) with a link to remove it, or `fallback`.
+function renderKeyHint(el, conn, field, fallback, warn) {
+  const link = (text, onclick) => {
+    const a = document.createElement('a');
+    a.href = '#';
+    a.textContent = text;
+    a.style.color = 'var(--accent)';
+    a.onclick = e => { e.preventDefault(); onclick(); renderKeyHint(el, conn, field, fallback, warn); };
+    return a;
+  };
+  el.style.color = '';
+  if (conn['has_' + field] && !secretsToClear.has(field)) {
+    el.textContent = `Saved key: ${conn[field + '_hint']}${savedOn(conn[field + '_saved_at'])}. Leave blank to keep it. `;
+    el.appendChild(link('Remove it', () => secretsToClear.add(field)));
+    return;
+  }
+  el.textContent = fallback;
+  if (warn) el.style.color = 'var(--warn)';
+  if (conn['has_' + field]) {
+    el.textContent = `The saved key will be removed when you SAVE. ${fallback} `;
+    el.appendChild(link('Keep it', () => secretsToClear.delete(field)));
+  }
+}
+
 function fillImageSettings(conn) {
   document.getElementById('falModelPresets').innerHTML =
     Object.keys(FAL_MODEL_PRESETS).map(m => `<option value="${m}">`).join('');
   document.getElementById('connFormFalKey').value = '';
-  document.getElementById('connFormFalKeyHint').textContent = conn.has_fal_key
-    ? `Saved key: ${conn.fal_key_hint}${savedOn(conn.fal_key_saved_at)}. Leave blank to keep it.` : FAL_KEY_HINT;
+  renderKeyHint(document.getElementById('connFormFalKeyHint'), conn, 'fal_key', FAL_KEY_HINT, false);
   document.getElementById('connFormImageModel').value = conn.image_model || '';
   document.getElementById('connFormImagesPerPage').value = conn.images_per_page ?? '';
   const params = conn.image_params;
@@ -862,6 +921,56 @@ function applyModelPreset() {
   if (preset && isPreset) paramsEl.value = JSON.stringify(preset);  // don't overwrite custom params
 }
 
+// Which providers have a fallback key in .env, and the DeepSeek model presets (from GET /api/connections).
+let aiMeta = { ai_env_keys: {}, deepseek_models: [] };
+let aiFormConn = {};  // the connection being edited
+const AI_KEY_INFO = {
+  anthropic: { label: 'Anthropic API key', env: 'ANTHROPIC_API_KEY', where: 'console.anthropic.com → API Keys' },
+  deepseek: { label: 'DeepSeek API key', env: 'DEEPSEEK_API_KEY', where: 'platform.deepseek.com → API keys (prepaid)' },
+};
+
+function fillAiSettings(conn) {
+  aiFormConn = conn;
+  secretsToClear = new Set();
+  document.getElementById('deepseekModelPresets').innerHTML =
+    aiMeta.deepseek_models.map(m => `<option value="${m}">`).join('');
+  document.getElementById('connFormAiProvider').value = conn.ai_provider === 'deepseek' ? 'deepseek' : 'anthropic';
+  document.getElementById('connFormDeepseekModel').value = conn.deepseek_model || '';
+  document.getElementById('connFormDeepseekEffort').value =
+    ['low', 'high', 'max'].includes(conn.deepseek_effort) ? conn.deepseek_effort : 'high';
+  onAiProviderChange();
+}
+
+function onAiProviderChange() {
+  const provider = document.getElementById('connFormAiProvider').value;
+  const deepseek = provider === 'deepseek';
+  document.querySelectorAll('#connFormModal .deepseek-only').forEach(el => { el.style.display = deepseek ? '' : 'none'; });
+  document.getElementById('connFormAiHint').textContent = deepseek
+    ? 'deepseek-v4-pro writes best; deepseek-flash is cheaper and about twice as fast. Higher effort thinks longer before writing: high takes minutes per page, max can take 10-20.'
+    : 'Writes with claude-sonnet-4-6.';
+  // A key typed for one provider must not be saved as the other's.
+  const info = AI_KEY_INFO[provider];
+  document.getElementById('connFormAiKey').value = '';
+  secretsToClear.delete('anthropic_key');
+  secretsToClear.delete('deepseek_key');
+  document.getElementById('connFormAiKeyLabel').textContent = info.label;
+  const fromEnv = aiMeta.ai_env_keys[provider];
+  renderKeyHint(document.getElementById('connFormAiKeyHint'), aiFormConn, `${provider}_key`,
+    fromEnv ? `Leave blank to use ${info.env} from .env.` : `⚠ No key yet: get one at ${info.where}.`, !fromEnv);
+}
+
+function aiFormSettings() {
+  const provider = document.getElementById('connFormAiProvider').value;
+  const settings = {
+    ai_provider: provider,
+    deepseek_model: document.getElementById('connFormDeepseekModel').value.trim(),
+    deepseek_effort: document.getElementById('connFormDeepseekEffort').value,
+  };
+  const key = document.getElementById('connFormAiKey').value.trim();
+  if (key) settings[`${provider}_key`] = key;
+  return settings;
+}
+
 async function draftImageStyle() {
   const id = document.getElementById('connFormId').value;
   if (!id) { showToast('Save the connection first', 'error'); return; }
@@ -872,7 +981,7 @@ async function draftImageStyle() {
     const resp = await fetch(`${API_BASE}/api/connections/${id}/image_style/draft`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ system_prompt: document.getElementById('connFormSystemPrompt').value }),
+      body: JSON.stringify({ system_prompt: document.getElementById('connFormSystemPrompt').value, ...aiFormSettings() }),
     });
     const data = await resp.json();
     if (data.error) throw new Error(data.error);
@@ -898,6 +1007,7 @@ function editConn(id) {
     `Leave blank to keep existing password${savedOn(conn.password_saved_at)}`;
   document.getElementById('connFormSystemPrompt').value = conn.system_prompt || '';
   document.getElementById('connFormChips').value = (conn.chips || []).join(', ');
+  fillAiSettings(conn);
   fillImageSettings(conn);
   document.getElementById('connFormTitle').textContent = '// EDIT CONNECTION';
   document.getElementById('connFormModal').classList.add('active');
@@ -918,6 +1028,7 @@ function showAddConnectionForm() {
   document.getElementById('connFormPassword').placeholder = 'Leave blank to keep existing password';
   document.getElementById('connFormSystemPrompt').value = '';
   document.getElementById('connFormChips').value = '';
+  fillAiSettings({});
   fillImageSettings({});
   document.getElementById('connFormTitle').textContent = '// ADD CONNECTION';
   document.getElementById('connFormModal').classList.add('active');
@@ -935,6 +1046,7 @@ function saveConnection() {
     username: document.getElementById('connFormUsername').value,
     system_prompt: document.getElementById('connFormSystemPrompt').value,
     chips: document.getElementById('connFormChips').value.split(',').map(s => s.trim()).filter(Boolean),
+    ...aiFormSettings(),
   };
   const password = document.getElementById('connFormPassword').value;
   if (password) body.password = password;
@@ -955,6 +1067,7 @@ function saveConnection() {
   body.image_style = document.getElementById('connFormImageStyle').value.trim();
   const falKey = document.getElementById('connFormFalKey').value.trim();
   if (falKey) body.fal_key = falKey;
+  if (secretsToClear.size) body.clear_secrets = [...secretsToClear];
   const url = id ? `${API_BASE}/api/connections/${id}` : API_BASE + '/api/connections';
   const method = id ? 'PUT' : 'POST';
   fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -1542,14 +1655,18 @@ async function pollJob(url, isRunning, signal) {
 }
 
 // "Approve all" can request dozens of long generations at once. Run only a few
-// at a time so they don't pile up behind the browser's per-host connection
-// limit, the server's worker threads and the Anthropic rate limit.
-const MAX_CONCURRENT_GENERATIONS = 3;
+// at a time so they don't pile up behind the server's worker threads and the AI
+// provider's rate limit; the connection says how many its provider takes.
+function maxConcurrentGenerations() {
+  const id = (currentPlan && currentPlan.connection_id) || activeConnectionId;
+  const conn = connections.find(c => c.id === id);
+  return (conn && conn.ai_concurrency) || 3;
+}
 let _activeGenerations = 0;
 const _generationWaiters = [];
 
 function acquireGenerationSlot(signal) {
-  if (_activeGenerations < MAX_CONCURRENT_GENERATIONS) {
+  if (_activeGenerations < maxConcurrentGenerations()) {
     _activeGenerations++;
     return Promise.resolve();
   }

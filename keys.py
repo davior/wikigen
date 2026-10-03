@@ -1,4 +1,4 @@
-"""Checks on a connection's secrets: its fal.ai key and wiki bot password."""
+"""Checks on a connection's secrets: its fal.ai and AI provider keys and wiki bot password."""
 
 import re
 
@@ -26,8 +26,39 @@ def fal_key_problem(key: str, wiki_password: str | None = None) -> str | None:
     return None
 
 
+def ai_key_problem(provider: str, key: str, wiki_password: str | None = None, strict: bool = True) -> str | None:
+    """Why `key` can't be the API key for `provider` ('anthropic' or 'deepseek'), or None.
+
+    `strict` adds the provider's key format, which only holds when calls go to the
+    provider itself rather than a gateway (ANTHROPIC_BASE_URL / DEEPSEEK_BASE_URL).
+    """
+    if wiki_password and key == wiki_password.strip():
+        return 'it is the same as the wiki password'
+    if re.search(r'\s', key):
+        return 'it contains spaces'
+    if ':' in key:
+        return 'it looks like a fal.ai key ("<key id>:<key secret>")'
+    if not strict:
+        return None
+    if provider == 'anthropic':
+        if key.startswith('sk-ant-oat'):
+            return 'it is a Claude subscription (OAuth) token, not an API key'
+        if key.startswith('sk-ant-admin'):
+            return 'it is an Admin API key, which can\'t write text; create a normal API key'
+        if not key.startswith('sk-ant-'):
+            return 'Anthropic API keys start with "sk-ant-"'
+    elif provider == 'deepseek':
+        if key.startswith('sk-ant-'):
+            return 'it is an Anthropic key, not a DeepSeek key'
+        if not key.startswith('sk-'):
+            return 'DeepSeek API keys start with "sk-"'
+    return None
+
+
 def wiki_password_problem(password: str) -> str | None:
     """Why `password` can't be the wiki bot password, or None."""
     if _FAL_KEY_STRICT_RE.match(password.strip()):
         return 'it is a fal.ai key, not a wiki bot password'
+    if password.strip().startswith('sk-ant-'):
+        return 'it is an Anthropic API key, not a wiki bot password'
     return None

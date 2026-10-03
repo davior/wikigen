@@ -3,8 +3,8 @@
 The planner needs to know every page that exists in the wiki (and ideally a
 little about each one) on every operation. Rebuilding that from the MediaWiki
 ``allpages`` API on each call costs ~N/50 sequential round-trips — and, more
-importantly, every change to the index text *invalidates the Anthropic prompt
-cache* for the index block and everything after it.
+importantly, every change to the index text *invalidates the AI provider's
+prompt cache* for the index block and everything after it.
 
 To keep that cache warm across a long content-generation session, the index is
 **frozen**: it is built once (auto-populated on first use), stored on the

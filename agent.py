@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional, Callable
 
 import image_gen
+import llm
 from wiki_client import WikiClient
 
 log = logging.getLogger(__name__)
@@ -177,6 +178,15 @@ def _extract_json(text: str) -> dict:
     return obj
 
 
+def _plan_json(raw: str) -> dict:
+    if not raw or not raw.strip():
+        raise ValueError('AI returned an empty response')
+    data = _extract_json(raw)
+    if not isinstance(data, dict):
+        raise ValueError('AI returned JSON that is not a plan object')
+    return data
+
+
 def _make_diff(old: str, new: str) -> str:
     return '\n'.join(difflib.unified_diff(
         old.splitlines(),
@@ -326,7 +336,7 @@ def _split_sections(content: str) -> list[dict]:
 # ─── AGENT ───────────────────────────────────────────────────────────────────
 
 class WikiAgent:
-    def __init__(self, wiki: WikiClient, anthropic_client, system_prompt: str,
+    def __init__(self, wiki: WikiClient, ai: 'llm.LLM', system_prompt: str,
                  connection_id: str, site_index: dict | None = None,
                  context_pages: list | None = None, uploads_dir=None,
                  recent_pages: dict | None = None,
@@ -338,7 +348,7 @@ class WikiAgent:
         # Reads/saves the connection's house style (get() -> str, set(style) -> str),
         # so a style drafted here is shared by every later image on this wiki.
         self._style_store = style_store
-        self.ai = anthropic_client
+        self.ai = ai
         self.connection_id = connection_id
         self.cancel_event = threading.Event()
         self._stream_callback: Optional[Callable] = None
@@ -378,15 +388,10 @@ class WikiAgent:
                 })
         self._system_blocks = blocks
 
-    def _call_ai(self, user_message: str, max_tokens: int = 64000,
-                 model: str = 'claude-sonnet-4-6') -> str:
-        with self.ai.messages.stream(
-            model=model,
-            max_tokens=max_tokens,
-            system=self._system_blocks,
-            messages=[{'role': 'user', 'content': user_message}],
-        ) as stream:
-            return stream.get_final_text()
+    def _call_ai(self, user_message: str, max_tokens: int | None = None,
+                 thinking: bool = True, effort: str | None = None) -> str:
+        return self.ai.complete(self._system_blocks, user_message, max_tokens=max_tokens,
+                                thinking=thinking, effort=effort, cancel_event=self.cancel_event)
 
     def _build_context_prefix(self, context_pages: list[dict]) -> str:
         if not context_pages:
@@ -514,10 +519,16 @@ class WikiAgent:
         user_message = '\n\n'.join(parts)
 
         try:
-            raw = self._call_ai(user_message)
-            if not raw or not raw.strip():
-                raise ValueError('AI returned an empty response')
-            data = _extract_json(raw)
+            # Think about the plan, but no deeper than 'high', so it comes back quickly.
+            effort = 'high' if self.ai.settings.effort == 'max' else None
+            try:
+                data = _plan_json(self._call_ai(user_message, effort=effort))
+            except ValueError as e:
+                # DeepSeek sometimes garbles JSON while thinking; ask once more without it.
+                if self.ai.provider != 'deepseek' or self.cancel_event.is_set():
+                    raise
+                log.warning('Plan JSON unusable (%s); asking again without thinking', e)
+                data = _plan_json(self._call_ai(user_message, thinking=False))
         except Exception as e:
             plan.description = f'Planning failed: {e}'
             plan.status = 'failed'
@@ -635,7 +646,9 @@ class WikiAgent:
             'Return JSON: {"replacements": [{"find": "...", "replace": "..."}]}'
         )
         try:
-            data = _extract_json(self._call_ai(prompt))
+            data = _extract_json(self._call_ai(prompt, thinking=False))
+        except (llm.Cancelled, llm.ProviderKeyError):
+            raise
         except Exception:
             return {'success': False, 'error': 'Could not parse find/replace pairs'}
         pairs = data.get('replacements', [])
@@ -706,7 +719,8 @@ class WikiAgent:
 
     def draft_image_style(self) -> str:
         """Ask the model for a house image style that fits this wiki (see image_gen)."""
-        return self._call_ai(image_gen.STYLE_GUIDE_PROMPT, max_tokens=1000).strip().strip('"').strip()
+        return self._call_ai(image_gen.STYLE_GUIDE_PROMPT, max_tokens=1000,
+                             thinking=False).strip().strip('"').strip()
 
     def _house_style(self) -> str:
         """The connection's image style guide, drafting and saving one if it has none yet."""
@@ -866,7 +880,7 @@ class WikiAgent:
         )
         valid_names = {s['name'] for s in sections}
         try:
-            data = _extract_json(self._call_ai(prompt, max_tokens=4000))
+            data = _extract_json(self._call_ai(prompt, max_tokens=4000, thinking=False))
             picks = data.get('images', []) if isinstance(data, dict) else data
             chosen, seen = [], set()
             for p in picks:
@@ -878,6 +892,8 @@ class WikiAgent:
                 chosen.append({'section': p['section'], 'prompt': p['prompt'].strip(),
                                'caption': _clean_caption(p.get('caption') or '') or p['section']})
             return chosen[:count]
+        except (llm.Cancelled, llm.ProviderKeyError):
+            raise
         except Exception:
             log.warning('Image section selection failed for "%s"; using the first sections', title)
             return [{'section': s['name'], 'caption': s['name'],
@@ -911,6 +927,8 @@ class WikiAgent:
 
     def _write_page(self, title: str, content: str, summary: str) -> dict:
         """Upload any generated images the content uses, then write the page."""
+        if self.cancel_event.is_set():
+            raise llm.Cancelled('Cancelled')
         image_gen.upload_generated_refs(self.wiki, content)
         return self.wiki.write_page(title, content, summary)
 
@@ -1046,6 +1064,11 @@ class WikiAgent:
             if not result.get('success'):
                 step.error = result.get('error', 'Unknown error')
 
+        except llm.Cancelled:
+            step.status = 'rejected'
+            step.error = 'Cancelled'
+            result = {'success': False, 'error': 'Cancelled'}
+
         except Exception as e:
             step.status = 'failed'
             step.error = str(e)
@@ -1107,7 +1130,7 @@ class WikiAgent:
                             else:
                                 ready_q.put(other)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.ai.concurrency) as executor:
             # Drain ready queue and submit, then wait for callbacks to feed more
             while True:
                 if self.cancel_event.is_set():

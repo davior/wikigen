@@ -16,7 +16,8 @@ A Flask web application for managing MediaWiki wikis via AI. Enter a natural lan
 - **Diff viewer** — Coloured before/after diff for Edit and Find & Replace operations
 - **Knowledge graph** — D3.js force-directed graph showing page links
 - **Wiki search** — Search the live wiki and load pages directly into the editor
-- **Prompt caching** — Anthropic API prompt caching reduces cost and latency on repeated calls
+- **Claude or DeepSeek** — Each wiki connection writes with Claude or DeepSeek (V4 Pro or Flash, with thinking), switchable in the UI
+- **Prompt caching** — The stable part of every prompt is cached (explicitly for Claude, automatically by DeepSeek), cutting cost and latency on repeated calls
 - **AI illustrations** — Pages get 2–3 images generated with [fal.ai](https://fal.ai) in a consistent house style for each wiki, placed where they fit the content
 
 ---
@@ -24,7 +25,7 @@ A Flask web application for managing MediaWiki wikis via AI. Enter a natural lan
 ## Requirements
 
 - Python 3.11+
-- An [Anthropic API key](https://console.anthropic.com/)
+- An [Anthropic API key](https://console.anthropic.com/) and/or a [DeepSeek API key](https://platform.deepseek.com/api_keys), for the providers your connections use (see [AI Provider](#ai-provider-claude-or-deepseek))
 - Optional: a [fal.ai API key](https://fal.ai/dashboard/keys) for image generation
 - A MediaWiki instance with a bot account (see [Bot Setup](#bot-setup) below)
 
@@ -64,7 +65,10 @@ cp .env.example .env
 
 | Variable | Required | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | Yes | Your Anthropic API key |
+| `ANTHROPIC_API_KEY` | No | Anthropic API key used by Claude connections that don't have their own (see [AI Provider](#ai-provider-claude-or-deepseek)) |
+| `DEEPSEEK_API_KEY` | No | DeepSeek API key used by DeepSeek connections that don't have their own |
+| `AI_TIMEOUT_MINUTES` | No | Stop an AI call that runs longer than this (default `30`) |
+| `DEEPSEEK_BASE_URL` | No | DeepSeek's Anthropic-compatible endpoint (default `https://api.deepseek.com/anthropic`) |
 | `FLASK_SECRET` | Recommended | Random string for Flask session signing |
 | `DATA_DIR` | No | Directory for `connections.json` and `history.json` (default: `.`) |
 | `PORT` | No | Port to listen on (default: `5055`) |
@@ -152,8 +156,13 @@ Open `http://<nas-ip>:5055/api/check_connection` (or Container Manager → wikig
 | `Login failed: …` | Network is fine; check the bot username/password in the connections manager. |
 | `fal.ai … failed (401)` | fal.ai didn't accept the key. The message shows which key was sent (e.g. `6f1d5c3e…cdef`) and whether it came from the connection or `FAL_KEY` in `.env`; compare it with fal.ai → Dashboard → Keys. **EDIT** on the connection shows the saved key the same way, with when it was saved. |
 | `fal.ai … failed (403)` | The key works but fal.ai refused the account, usually for an exhausted balance (fal.ai → Dashboard → Billing). |
+| `This connection has no … API key` | Paste the key into Connections → **EDIT** → *AI model* → *API key* (or set `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` in `.env` as the fallback and rebuild the project). |
+| `… rejected the API key … (401)` | The provider didn't accept the key. The message shows which key was sent (e.g. `sk-0123a…cdef`) and whether it came from the connection or `.env`; compare it with console.anthropic.com → API Keys or platform.deepseek.com → API keys. |
+| `… insufficient balance … (402)` | DeepSeek is prepaid: top up at platform.deepseek.com → Top up. |
+| `The … key in … is unusable: …` | The key was refused before anything was sent, for the reason given (e.g. the wrong provider's key, a fal.ai key, or the wiki password). Re-enter it in Connections → **EDIT**, or, if it came from `.env`, fix it there and rebuild the project. |
+| `… used its whole output budget … before writing an answer` | The model spent all its tokens thinking. Lower the connection's **Reasoning effort**. |
 
-MediaWiki drops idle logins (after an hour by default) and every login when its cache restarts. WikiGen pings each wiki it's logged in to every `WIKI_KEEPALIVE_MINUTES` (10) so the login doesn't go idle, checks the login before planning, generating or writing, and logs in again when the wiki has dropped it anyway, so there's no need to re-save a connection after a break. Writes are sent with `assert=user`, so the wiki refuses a write it would otherwise make anonymously. Planning, generating and executing also stop early, with the reason, if the connection's wiki login fails or its saved fal.ai key isn't usable.
+MediaWiki drops idle logins (after an hour by default) and every login when its cache restarts. WikiGen pings each wiki it's logged in to every `WIKI_KEEPALIVE_MINUTES` (10) so the login doesn't go idle, checks the login before planning, generating or writing, and logs in again when the wiki has dropped it anyway, so there's no need to re-save a connection after a break. Writes are sent with `assert=user`, so the wiki refuses a write it would otherwise make anonymously. Planning, generating and executing also stop early, with the reason, if the connection's wiki login fails, it has no usable AI key, or its saved fal.ai key isn't usable.
 
 Test name resolution from the NAS over SSH:
 
@@ -195,6 +204,32 @@ https://yourwiki.example.com/w/api.php
 | **Disambig** | Creates redirect/disambiguation pages for abbreviations | *"Ensure disambiguation pages exist for DEW, V2K, RNM, TI, NWO"* |
 | **Rename** | Moves pages, preserving edit history | *"Rename 'Lucerferianism' to 'Luciferianism' (fix the typo)"* |
 | **Audit** | Read-only analysis, returns a report | *"Which pages are stubs and what topics are missing?"* |
+
+---
+
+## AI Provider (Claude or DeepSeek)
+
+Each connection writes with one AI model, chosen in Connections → **EDIT** → *AI model*. Connections saved before this setting existed use Claude. Switching takes effect on the next plan or page, with no restart.
+
+| Setting | What it does |
+|---|---|
+| **Provider** | **Claude** (`claude-sonnet-4-6`) or **DeepSeek**. |
+| **API key** | The key for the chosen provider: from console.anthropic.com → API Keys (Claude) or platform.deepseek.com → API keys (DeepSeek, prepaid). Each connection keeps one key per provider, so switching back and forth keeps both. Leave it blank to keep the saved key; **Remove it** deletes the saved key, after which the connection uses `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` from `.env` if set. Connections saved before keys could be set here use the `.env` key. |
+| **Model** (DeepSeek) | `deepseek-v4-pro` (default) writes best. `deepseek-flash` is cheaper and about twice as fast. Any other DeepSeek model ID can be typed in. |
+| **Reasoning effort** (DeepSeek) | How long DeepSeek thinks before writing: `low`, `high` (default) or `max`. Effort sets how carefully it reasons, not how long the page is (the instruction sets that). At `high` a long page takes several minutes; `max` can take 10–20 minutes on Pro. |
+
+**How DeepSeek is used:**
+
+- WikiGen calls DeepSeek through its Anthropic-compatible API (`https://api.deepseek.com/anthropic`), so no extra library is needed.
+- Pages and plans are written with thinking on. Plans think at `high` at most, so they come back quickly, and are asked for once more without thinking if the JSON comes back unusable. Small helper calls (choosing image sections, drafting the house style, reading find/replace pairs) run without thinking.
+- Up to 6 pages are generated at once on DeepSeek, against 3 on Claude.
+- DeepSeek caches repeated prompt prefixes by itself; cached input costs a small fraction of the normal price.
+- **Pricing.** DeepSeek charges double from 01:00–04:00 and 06:00–10:00 UTC on weekdays, so big runs are cheaper outside those hours. Each call's model, token counts and time are written to the container log.
+- Cancelling a plan or an execution stops the page being written, and a page cancelled mid-generation is not published. An AI call that runs longer than `AI_TIMEOUT_MINUTES` (30) is stopped.
+
+**Keys.** Keys saved on a connection are stored in `connections.json` (in `data/` on Synology) and never sent back to the browser, which only sees a masked version (e.g. `sk-0123a…cdef`) to tell which key is saved. Treat that file and its backups as secret. Pasting a key into the form takes effect immediately. The `.env` fallback is only read when the container is created, so after changing it, rebuild the project in Container Manager (Project → wikigen → Action → **Build**); a Watchtower update alone keeps the old settings.
+
+Updates and Watchtower restarts kill a generation in progress, so don't start a long DeepSeek run just before the nightly update.
 
 ---
 
@@ -264,8 +299,9 @@ wikigen/
 ├── app.py              # Flask backend — all routes and connections manager
 ├── wiki_client.py      # MediaWiki API client (auth, CRUD, search, pagination)
 ├── agent.py            # AI planner + executor, OperationStep/Plan dataclasses
+├── llm.py              # AI provider per connection (Claude or DeepSeek): settings, keys, calls
 ├── image_gen.py        # fal.ai image generation + store of generated images
-├── keys.py             # Checks on saved secrets (fal.ai key, wiki password)
+├── keys.py             # Checks on saved secrets (fal.ai and AI provider keys, wiki password)
 ├── requirements.txt
 ├── .gitignore
 ├── connections.json    # Created at runtime — saved wiki connections
@@ -301,9 +337,9 @@ wikigen/
 
 | Method | Route | Description |
 |---|---|---|
-| `GET` | `/api/connections` | List all connections (secrets replaced by `has_*` flags, `*_saved_at` dates and a masked `fal_key_hint`) |
+| `GET` | `/api/connections` | List all connections (secrets replaced by `has_*` flags, `*_saved_at` dates and masked `fal_key_hint` / `anthropic_key_hint` / `deepseek_key_hint`) |
 | `POST` | `/api/connections` | Add a connection |
-| `PUT` | `/api/connections/<id>` | Update a connection |
+| `PUT` | `/api/connections/<id>` | Update a connection (blank secrets keep the saved value; `clear_secrets: ["deepseek_key", …]` removes saved keys) |
 | `DELETE` | `/api/connections/<id>` | Delete a connection |
 | `POST` | `/api/connections/<id>/activate` | Set active connection |
 | `POST` | `/api/connections/<id>/test` | Log in to the wiki again; `error` gives the reason if it fails |
@@ -323,7 +359,7 @@ wikigen/
 - **Background jobs** — Planning and step content generation run in background threads, and the page polls for the result every few seconds rather than holding a request open for minutes (a dropped connection would otherwise lose the result). Execution streams its progress via Server-Sent Events.
 - **Rate limiting** — WikiGen enforces a 1-second minimum between wiki write operations to stay within MediaWiki's default bot rate limit.
 - **CSRF tokens** — Automatically refreshed on `badtoken` errors; no manual intervention needed.
-- **Prompt caching** — The Anthropic system prompt uses `cache_control: ephemeral`. The stable blocks (planner rules + site index) are cached for **1 hour**; per-request context keeps the default 5-minute TTL — giving ~90% cost reduction on repeated calls.
+- **Prompt caching** — For Claude, the system prompt uses `cache_control: ephemeral`. The stable blocks (planner rules + site index) are cached for **1 hour**; per-request context keeps the default 5-minute TTL — giving ~90% cost reduction on repeated calls. DeepSeek ignores `cache_control` (WikiGen strips it) and caches identical prompt prefixes automatically, which the same block order (stable blocks first) also benefits from.
 - **Frozen site index** — The list of all pages (with categories and short descriptions) is built once (auto-populated on first use), stored per connection in a local sidecar file (`site_index_<id>.json`) and mirrored to a JSON page in the wiki (`User:<bot>/wikigen-index.json`, override per connection with `index_page`). It is then reused **byte-for-byte** on every operation so the planner's prompt-cache block stays warm across a whole content-generation session — instead of re-scanning `allpages` (and busting the cache) each time. It only rebuilds when you press **REINDEX**. Pages created mid-session are tracked separately and surfaced to the planner in the uncached prompt tail (so it won't recreate them) without touching the cached block. A cheap `recentchanges` check powers a passive "wiki changed since last refresh" hint in the connections UI. See `site_index.py`.
 - **Plan persistence** — Plans are saved to `plans/<id>.json` on completion and survive server restarts.
 
