@@ -647,7 +647,7 @@ class WikiAgent:
         )
         try:
             data = _extract_json(self._call_ai(prompt, thinking=False))
-        except llm.Cancelled:
+        except (llm.Cancelled, llm.ProviderKeyError):
             raise
         except Exception:
             return {'success': False, 'error': 'Could not parse find/replace pairs'}
@@ -892,7 +892,7 @@ class WikiAgent:
                 chosen.append({'section': p['section'], 'prompt': p['prompt'].strip(),
                                'caption': _clean_caption(p.get('caption') or '') or p['section']})
             return chosen[:count]
-        except llm.Cancelled:
+        except (llm.Cancelled, llm.ProviderKeyError):
             raise
         except Exception:
             log.warning('Image section selection failed for "%s"; using the first sections', title)

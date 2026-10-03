@@ -65,8 +65,8 @@ cp .env.example .env
 
 | Variable | Required | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | For Claude | Your Anthropic API key. Needed by Claude connections, which includes every connection saved before the provider choice existed |
-| `DEEPSEEK_API_KEY` | For DeepSeek | Your DeepSeek API key, needed by connections set to DeepSeek |
+| `ANTHROPIC_API_KEY` | No | Anthropic API key used by Claude connections that don't have their own (see [AI Provider](#ai-provider-claude-or-deepseek)) |
+| `DEEPSEEK_API_KEY` | No | DeepSeek API key used by DeepSeek connections that don't have their own |
 | `AI_TIMEOUT_MINUTES` | No | Stop an AI call that runs longer than this (default `30`) |
 | `DEEPSEEK_BASE_URL` | No | DeepSeek's Anthropic-compatible endpoint (default `https://api.deepseek.com/anthropic`) |
 | `FLASK_SECRET` | Recommended | Random string for Flask session signing |
@@ -156,12 +156,12 @@ Open `http://<nas-ip>:5055/api/check_connection` (or Container Manager → wikig
 | `Login failed: …` | Network is fine; check the bot username/password in the connections manager. |
 | `fal.ai … failed (401)` | fal.ai didn't accept the key. The message shows which key was sent (e.g. `6f1d5c3e…cdef`) and whether it came from the connection or `FAL_KEY` in `.env`; compare it with fal.ai → Dashboard → Keys. **EDIT** on the connection shows the saved key the same way, with when it was saved. |
 | `fal.ai … failed (403)` | The key works but fal.ai refused the account, usually for an exhausted balance (fal.ai → Dashboard → Billing). |
-| `… is not set in .env, and this connection uses …` | Add that key to `/volume1/docker/wikigen/.env` and rebuild the project. A Watchtower update alone keeps the old settings. |
-| DeepSeek `401` / `authentication` | DeepSeek didn't accept `DEEPSEEK_API_KEY`; check it at platform.deepseek.com → API keys. |
-| DeepSeek `402` / `Insufficient Balance` | DeepSeek is prepaid: top up at platform.deepseek.com → Top up. |
+| `This connection has no … API key` | Paste the key into Connections → **EDIT** → *AI model* → *API key* (or set `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` in `.env` as the fallback and rebuild the project). |
+| `… rejected the API key … (401)` | The provider didn't accept the key. The message shows which key was sent (e.g. `sk-0123a…cdef`) and whether it came from the connection or `.env`; compare it with console.anthropic.com → API Keys or platform.deepseek.com → API keys. |
+| `… insufficient balance … (402)` | DeepSeek is prepaid: top up at platform.deepseek.com → Top up. |
 | `… used its whole output budget … before writing an answer` | The model spent all its tokens thinking. Lower the connection's **Reasoning effort**. |
 
-MediaWiki drops idle logins (after an hour by default) and every login when its cache restarts. WikiGen pings each wiki it's logged in to every `WIKI_KEEPALIVE_MINUTES` (10) so the login doesn't go idle, checks the login before planning, generating or writing, and logs in again when the wiki has dropped it anyway, so there's no need to re-save a connection after a break. Writes are sent with `assert=user`, so the wiki refuses a write it would otherwise make anonymously. Planning, generating and executing also stop early, with the reason, if the connection's wiki login fails or its saved fal.ai key isn't usable.
+MediaWiki drops idle logins (after an hour by default) and every login when its cache restarts. WikiGen pings each wiki it's logged in to every `WIKI_KEEPALIVE_MINUTES` (10) so the login doesn't go idle, checks the login before planning, generating or writing, and logs in again when the wiki has dropped it anyway, so there's no need to re-save a connection after a break. Writes are sent with `assert=user`, so the wiki refuses a write it would otherwise make anonymously. Planning, generating and executing also stop early, with the reason, if the connection's wiki login fails, it has no usable AI key, or its saved fal.ai key isn't usable.
 
 Test name resolution from the NAS over SSH:
 
@@ -212,7 +212,8 @@ Each connection writes with one AI model, chosen in Connections → **EDIT** →
 
 | Setting | What it does |
 |---|---|
-| **Provider** | **Claude** (`claude-sonnet-4-6`, needs `ANTHROPIC_API_KEY`) or **DeepSeek** (needs `DEEPSEEK_API_KEY`). The form warns if the key isn't in `.env`. |
+| **Provider** | **Claude** (`claude-sonnet-4-6`) or **DeepSeek**. |
+| **API key** | The key for the chosen provider: from console.anthropic.com → API Keys (Claude) or platform.deepseek.com → API keys (DeepSeek, prepaid). Each connection keeps one key per provider, so switching back and forth keeps both. Leave it blank to keep the saved key; **Remove it** deletes the saved key, after which the connection uses `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` from `.env` if set. Connections saved before keys could be set here use the `.env` key. |
 | **Model** (DeepSeek) | `deepseek-v4-pro` (default) writes best. `deepseek-flash` is cheaper and about twice as fast. Any other DeepSeek model ID can be typed in. |
 | **Reasoning effort** (DeepSeek) | How long DeepSeek thinks before writing: `low`, `high` (default) or `max`. Effort sets how carefully it reasons, not how long the page is (the instruction sets that). At `high` a long page takes several minutes; `max` can take 10–20 minutes on Pro. |
 
@@ -225,7 +226,9 @@ Each connection writes with one AI model, chosen in Connections → **EDIT** →
 - **Pricing.** DeepSeek charges double from 01:00–04:00 and 06:00–10:00 UTC on weekdays, so big runs are cheaper outside those hours. Each call's model, token counts and time are written to the container log.
 - Cancelling a plan or an execution stops the page being written, and a page cancelled mid-generation is not published. An AI call that runs longer than `AI_TIMEOUT_MINUTES` (30) is stopped.
 
-**Adding the DeepSeek key on Synology:** add `DEEPSEEK_API_KEY=...` to `/volume1/docker/wikigen/.env`, then rebuild the project in Container Manager (Project → wikigen → Action → **Build**). `.env` is only read when the container is created, so a Watchtower update alone doesn't pick up the key, but it keeps the key once the project is rebuilt. Updates and Watchtower restarts kill a generation in progress, so don't start a long DeepSeek run just before the nightly update.
+**Keys.** Keys saved on a connection are stored in `connections.json` (in `data/` on Synology) and never sent back to the browser, which only sees a masked version (e.g. `sk-0123a…cdef`) to tell which key is saved. Treat that file and its backups as secret. Pasting a key into the form takes effect immediately. The `.env` fallback is only read when the container is created, so after changing it, rebuild the project in Container Manager (Project → wikigen → Action → **Build**); a Watchtower update alone keeps the old settings.
+
+Updates and Watchtower restarts kill a generation in progress, so don't start a long DeepSeek run just before the nightly update.
 
 ---
 
@@ -333,9 +336,9 @@ wikigen/
 
 | Method | Route | Description |
 |---|---|---|
-| `GET` | `/api/connections` | List all connections (secrets replaced by `has_*` flags, `*_saved_at` dates and a masked `fal_key_hint`) |
+| `GET` | `/api/connections` | List all connections (secrets replaced by `has_*` flags, `*_saved_at` dates and masked `fal_key_hint` / `anthropic_key_hint` / `deepseek_key_hint`) |
 | `POST` | `/api/connections` | Add a connection |
-| `PUT` | `/api/connections/<id>` | Update a connection |
+| `PUT` | `/api/connections/<id>` | Update a connection (blank secrets keep the saved value; `clear_secrets: ["deepseek_key", …]` removes saved keys) |
 | `DELETE` | `/api/connections/<id>` | Delete a connection |
 | `POST` | `/api/connections/<id>/activate` | Set active connection |
 | `POST` | `/api/connections/<id>/test` | Log in to the wiki again; `error` gives the reason if it fails |

@@ -54,7 +54,9 @@ _plan_save_lock = threading.Lock()
 _connections_lock = threading.RLock()
 
 # Connection fields never sent back to the browser; an empty value on update keeps the old one.
-_SECRET_FIELDS = ('password', 'fal_key', 'api_token')
+_SECRET_FIELDS = ('password', 'fal_key', 'api_token', 'anthropic_key', 'deepseek_key')
+# API keys the browser sees masked (to tell which one is saved) and can remove.
+_HINTED_SECRETS = ('fal_key', 'anthropic_key', 'deepseek_key')
 
 
 # ─── CONNECTIONS ──────────────────────────────────────────────────────────────
@@ -115,17 +117,19 @@ def _public_connection(conn: dict) -> dict:
     public = {k: v for k, v in conn.items() if k not in _SECRET_FIELDS}
     for key in _SECRET_FIELDS:
         public[f'has_{key}'] = bool(conn.get(key))
-    # Which fal.ai key is saved, to compare with fal.ai's dashboard without re-entering it.
-    public['fal_key_hint'] = keys.mask_key(conn['fal_key']) if conn.get('fal_key') else ''
+    # Which key is saved, to compare with the provider's dashboard without re-entering it.
+    for key in _HINTED_SECRETS:
+        public[f'{key}_hint'] = keys.mask_key(conn[key]) if conn.get(key) else ''
     ai = llm.settings_for(conn)
     public['ai_label'] = ai.label
     public['ai_concurrency'] = ai.spec.concurrency
+    public['ai_key_missing'] = not llm.key_for(conn, ai.provider)[0]
     return public
 
 
 def _preflight(conn: dict, client: WikiClient | None, need_images: bool = False) -> str | None:
     """Why the keys the work needs aren't usable, checked before it starts; None if they are."""
-    if problem := llm.key_problem(llm.settings_for(conn)):
+    if problem := llm.key_problem(conn):
         return problem
     fal_key, source = image_gen.fal_key_for(conn)
     if fal_key:
@@ -167,7 +171,7 @@ class _ImageStyleStore:
 
 
 def _make_agent(client: WikiClient, conn: dict, **kwargs) -> WikiAgent:
-    return WikiAgent(client, llm.LLM(llm.settings_for(conn)), conn.get('system_prompt', ''), conn['id'],
+    return WikiAgent(client, llm.for_connection(conn), conn.get('system_prompt', ''), conn['id'],
                      image_generator=image_gen.from_connection(conn),
                      style_store=_ImageStyleStore(conn['id']), **kwargs)
 
@@ -405,20 +409,29 @@ def _attach_uploads_to_plan(plan: OperationPlan, context_pages: list):
 def list_connections():
     data = _load_connections()
     return jsonify({**data, 'connections': [_public_connection(c) for c in data.get('connections', [])],
-                    'ai_keys': llm.keys_present(), 'deepseek_models': llm.DEEPSEEK_MODELS})
+                    'ai_env_keys': llm.env_keys(), 'deepseek_models': llm.DEEPSEEK_MODELS})
 
 
 def _check_secrets(body: dict, conn: dict | None = None) -> str | None:
-    """Why a fal.ai key or wiki password being saved is unusable, or None. Strips the key in place."""
-    body['fal_key'] = str(body.get('fal_key') or '').strip()
+    """Why an API key or wiki password being saved is unusable, or None. Strips the keys in place."""
+    conn = conn or {}
+    for key in _HINTED_SECRETS:
+        body[key] = str(body.get(key) or '').strip()
     autofill = ' If a browser or password manager filled the field, clear it and save again.'
+    password = body.get('password') or conn.get('password')
     if body['fal_key']:
-        password = body.get('password') or (conn or {}).get('password')
         if problem := keys.fal_key_problem(body['fal_key'], password):
             return f'That fal.ai key is unusable: {problem}.{autofill}'
+    for name, spec in llm.PROVIDERS.items():
+        if body[spec.key_field]:
+            if problem := keys.ai_key_problem(name, body[spec.key_field], password,
+                                              strict=llm.official_endpoint(name)):
+                return f'That {spec.label} API key is unusable: {problem}.{autofill}'
     if body.get('password'):
         if problem := keys.wiki_password_problem(body['password']):
             return f'That wiki password is unusable: {problem}.{autofill}'
+        if body['password'].strip() in {body[k] or conn.get(k) for k in _HINTED_SECRETS} - {None, ''}:
+            return f'That wiki password is unusable: it is the same as an API key.{autofill}'
     return None
 
 
@@ -452,6 +465,8 @@ def add_connection():
         'ai_provider': body.get('ai_provider', ''),
         'deepseek_model': body.get('deepseek_model', ''),
         'deepseek_effort': body.get('deepseek_effort', ''),
+        'anthropic_key': body.get('anthropic_key', ''),
+        'deepseek_key': body.get('deepseek_key', ''),
     }
     _stamp_secrets(conn, body)
     with _connections_lock:
@@ -466,6 +481,9 @@ def add_connection():
 @app.route('/api/connections/<conn_id>', methods=['PUT'])
 def update_connection(conn_id: str):
     body = request.json or {}
+    # Saved keys to remove, e.g. so the connection falls back to the .env key.
+    clear = body.pop('clear_secrets', None)
+    clear = [k for k in clear if k in _HINTED_SECRETS] if isinstance(clear, list) else []
     with _connections_lock:
         data = _load_connections()
         for conn in data['connections']:
@@ -474,6 +492,10 @@ def update_connection(conn_id: str):
                     return jsonify({'error': problem}), 400
                 conn.update({k: v for k, v in body.items()
                              if k != 'id' and not k.startswith('has_') and not (k in _SECRET_FIELDS and not v)})
+                for key in clear:
+                    if not body.get(key):
+                        conn.pop(key, None)
+                        conn.pop(f'{key}_saved_at', None)
                 _stamp_secrets(conn, body)
                 _wiki_clients.pop(conn_id, None)
                 _save_connections(data)
@@ -553,11 +575,14 @@ def draft_image_style(conn_id: str):
     if not conn:
         return jsonify({'error': 'Not found'}), 404
     body = request.json or {}
-    if problem := llm.settings_problem(body):
+    if problem := _check_secrets(body, conn) or llm.settings_problem(body):
         return jsonify({'error': problem}), 400
-    # Use the system prompt and AI settings as currently set in the form, saved or not.
-    conn = {**conn, **{k: body[k] for k in _DRAFT_FORM_FIELDS if k in body}}
-    if problem := llm.key_problem(llm.settings_for(conn)):
+    # Use the system prompt and AI settings as currently set in the form, saved or not, and an
+    # API key typed there (a blank key field keeps the saved key).
+    typed = [spec.key_field for spec in llm.PROVIDERS.values() if body[spec.key_field]]
+    conn = {**conn, **{k: body[k] for k in _DRAFT_FORM_FIELDS if k in body},
+            **{k: body[k] for k in typed}, llm.TYPED_KEYS: typed}
+    if problem := llm.key_problem(conn):
         return jsonify({'error': problem}), 400
     client = get_wiki_client(conn_id)
     index = _site_index(client, conn) if client else {}
