@@ -154,8 +154,9 @@ def key_problem(conn: dict) -> str | None:
                 f'(or set {spec.key_env} in .env).')
     if problem := keys.ai_key_problem(settings.provider, key, conn.get('password'),
                                       strict=official_endpoint(settings.provider)):
-        return (f'The {spec.label} key in {source} ({keys.mask_key(key)}) is unusable: {problem}. '
-                'Re-enter it in Connections → Edit.')
+        fix = (f'Fix {spec.key_env} in .env and rebuild the project, or add a key in Connections → Edit → AI model.'
+               if source.endswith('in .env') else 'Re-enter it in Connections → Edit.')
+        return f'The {spec.label} key in {source} ({keys.mask_key(key)}) is unusable: {problem}. {fix}'
     return None
 
 
@@ -320,4 +321,4 @@ class LLM:
         else:
             reason = f'{spec.label} refused the account behind key {key}; check it at {spec.key_url}'
         detail = str(getattr(e, 'message', '') or e)[:200]
-        return f'{reason} ({e.status_code}: {detail})'
+        return f'{reason} ({e.status_code}): {detail}'

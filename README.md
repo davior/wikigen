@@ -159,6 +159,7 @@ Open `http://<nas-ip>:5055/api/check_connection` (or Container Manager → wikig
 | `This connection has no … API key` | Paste the key into Connections → **EDIT** → *AI model* → *API key* (or set `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` in `.env` as the fallback and rebuild the project). |
 | `… rejected the API key … (401)` | The provider didn't accept the key. The message shows which key was sent (e.g. `sk-0123a…cdef`) and whether it came from the connection or `.env`; compare it with console.anthropic.com → API Keys or platform.deepseek.com → API keys. |
 | `… insufficient balance … (402)` | DeepSeek is prepaid: top up at platform.deepseek.com → Top up. |
+| `The … key in … is unusable: …` | The key was refused before anything was sent, for the reason given (e.g. the wrong provider's key, a fal.ai key, or the wiki password). Re-enter it in Connections → **EDIT**, or, if it came from `.env`, fix it there and rebuild the project. |
 | `… used its whole output budget … before writing an answer` | The model spent all its tokens thinking. Lower the connection's **Reasoning effort**. |
 
 MediaWiki drops idle logins (after an hour by default) and every login when its cache restarts. WikiGen pings each wiki it's logged in to every `WIKI_KEEPALIVE_MINUTES` (10) so the login doesn't go idle, checks the login before planning, generating or writing, and logs in again when the wiki has dropped it anyway, so there's no need to re-save a connection after a break. Writes are sent with `assert=user`, so the wiki refuses a write it would otherwise make anonymously. Planning, generating and executing also stop early, with the reason, if the connection's wiki login fails, it has no usable AI key, or its saved fal.ai key isn't usable.
@@ -300,7 +301,7 @@ wikigen/
 ├── agent.py            # AI planner + executor, OperationStep/Plan dataclasses
 ├── llm.py              # AI provider per connection (Claude or DeepSeek): settings, keys, calls
 ├── image_gen.py        # fal.ai image generation + store of generated images
-├── keys.py             # Checks on saved secrets (fal.ai key, wiki password)
+├── keys.py             # Checks on saved secrets (fal.ai and AI provider keys, wiki password)
 ├── requirements.txt
 ├── .gitignore
 ├── connections.json    # Created at runtime — saved wiki connections
