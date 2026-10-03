@@ -570,7 +570,7 @@ textarea#prompt::placeholder { color: var(--text3); }
   <div class="loading-box">
     <div class="spinner"></div>
     <div class="loading-text" id="loadingText">PLANNING...</div>
-    <div class="loading-sub" id="loadingSub">Calling Anthropic API</div>
+    <div class="loading-sub" id="loadingSub">Calling AI model</div>
   </div>
 </div>
 
@@ -626,6 +626,31 @@ textarea#prompt::placeholder { color: var(--text3); }
         <label class="form-label">Quick Prompt Chips (comma separated)</label>
         <input class="form-input" id="connFormChips" placeholder="Transhumanism, DEWs, TI Program">
       </div>
+
+      <div class="form-section-title">// AI MODEL</div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Provider</label>
+          <select class="form-input" id="connFormAiProvider" onchange="onAiProviderChange()">
+            <option value="anthropic">Claude (Anthropic)</option>
+            <option value="deepseek">DeepSeek</option>
+          </select>
+        </div>
+        <div class="form-group deepseek-only">
+          <label class="form-label">Model</label>
+          <input class="form-input" id="connFormDeepseekModel" list="deepseekModelPresets" placeholder="deepseek-v4-pro" autocomplete="off" spellcheck="false">
+          <datalist id="deepseekModelPresets"></datalist>
+        </div>
+        <div class="form-group deepseek-only" style="flex:0 0 130px">
+          <label class="form-label">Reasoning effort</label>
+          <select class="form-input" id="connFormDeepseekEffort">
+            <option value="low">low</option>
+            <option value="high">high</option>
+            <option value="max">max</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-hint" id="connFormAiHint" style="margin:-8px 0 14px"></div>
 
       <div class="form-section-title">// IMAGE GENERATION (FAL.AI)</div>
       <div class="form-group">
@@ -754,6 +779,7 @@ function openConnectionsModal() {
     .then(data => {
       connections = data.connections || [];
       activeConnectionId = data.active_connection_id;
+      aiMeta = { ai_keys: data.ai_keys || {}, deepseek_models: data.deepseek_models || [] };
       renderConnectionsModal();
       document.getElementById('connectionsModal').classList.add('active');
     });
@@ -777,6 +803,7 @@ function renderConnectionsModal() {
       <div style="flex:1">
         <div class="conn-name">${escapeHtml(c.name)}</div>
         <div class="conn-url">${escapeHtml(c.wiki_url)}</div>
+        <div class="conn-url">${escapeHtml(c.ai_label || '')}</div>
         <div class="conn-index" id="connIndex-${c.id}" style="font-size:9px;color:var(--text3);font-family:'IBM Plex Mono',monospace;margin-top:2px"></div>
       </div>
       ${!isActive ? `<button class="step-btn step-btn-approve" onclick="activateConn('${c.id}')">ACTIVATE</button>` : '<span style="font-size:9px;color:var(--accent3);font-family:\'IBM Plex Mono\',monospace">ACTIVE</span>'}
@@ -862,6 +889,44 @@ function applyModelPreset() {
   if (preset && isPreset) paramsEl.value = JSON.stringify(preset);  // don't overwrite custom params
 }
 
+// Which providers have a key in .env, and the DeepSeek model presets (from GET /api/connections).
+let aiMeta = { ai_keys: {}, deepseek_models: [] };
+
+function fillAiSettings(conn) {
+  document.getElementById('deepseekModelPresets').innerHTML =
+    aiMeta.deepseek_models.map(m => `<option value="${m}">`).join('');
+  document.getElementById('connFormAiProvider').value = conn.ai_provider === 'deepseek' ? 'deepseek' : 'anthropic';
+  document.getElementById('connFormDeepseekModel').value = conn.deepseek_model || '';
+  document.getElementById('connFormDeepseekEffort').value =
+    ['low', 'high', 'max'].includes(conn.deepseek_effort) ? conn.deepseek_effort : 'high';
+  onAiProviderChange();
+}
+
+function onAiProviderChange() {
+  const provider = document.getElementById('connFormAiProvider').value;
+  const deepseek = provider === 'deepseek';
+  document.querySelectorAll('#connFormModal .deepseek-only').forEach(el => { el.style.display = deepseek ? '' : 'none'; });
+  const hint = document.getElementById('connFormAiHint');
+  if (!aiMeta.ai_keys[provider]) {
+    const keyEnv = deepseek ? 'DEEPSEEK_API_KEY' : 'ANTHROPIC_API_KEY';
+    hint.textContent = `⚠ ${keyEnv} isn't set in .env. Add it and rebuild the project before using this connection.`;
+    hint.style.color = 'var(--warn)';
+  } else {
+    hint.textContent = deepseek
+      ? 'deepseek-v4-pro writes best; deepseek-flash is cheaper and about twice as fast. Higher effort thinks longer before writing: high takes minutes per page, max can take 10-20.'
+      : 'Writes with claude-sonnet-4-6.';
+    hint.style.color = '';
+  }
+}
+
+function aiFormSettings() {
+  return {
+    ai_provider: document.getElementById('connFormAiProvider').value,
+    deepseek_model: document.getElementById('connFormDeepseekModel').value.trim(),
+    deepseek_effort: document.getElementById('connFormDeepseekEffort').value,
+  };
+}
+
 async function draftImageStyle() {
   const id = document.getElementById('connFormId').value;
   if (!id) { showToast('Save the connection first', 'error'); return; }
@@ -872,7 +937,7 @@ async function draftImageStyle() {
     const resp = await fetch(`${API_BASE}/api/connections/${id}/image_style/draft`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ system_prompt: document.getElementById('connFormSystemPrompt').value }),
+      body: JSON.stringify({ system_prompt: document.getElementById('connFormSystemPrompt').value, ...aiFormSettings() }),
     });
     const data = await resp.json();
     if (data.error) throw new Error(data.error);
@@ -898,6 +963,7 @@ function editConn(id) {
     `Leave blank to keep existing password${savedOn(conn.password_saved_at)}`;
   document.getElementById('connFormSystemPrompt').value = conn.system_prompt || '';
   document.getElementById('connFormChips').value = (conn.chips || []).join(', ');
+  fillAiSettings(conn);
   fillImageSettings(conn);
   document.getElementById('connFormTitle').textContent = '// EDIT CONNECTION';
   document.getElementById('connFormModal').classList.add('active');
@@ -918,6 +984,7 @@ function showAddConnectionForm() {
   document.getElementById('connFormPassword').placeholder = 'Leave blank to keep existing password';
   document.getElementById('connFormSystemPrompt').value = '';
   document.getElementById('connFormChips').value = '';
+  fillAiSettings({});
   fillImageSettings({});
   document.getElementById('connFormTitle').textContent = '// ADD CONNECTION';
   document.getElementById('connFormModal').classList.add('active');
@@ -935,6 +1002,7 @@ function saveConnection() {
     username: document.getElementById('connFormUsername').value,
     system_prompt: document.getElementById('connFormSystemPrompt').value,
     chips: document.getElementById('connFormChips').value.split(',').map(s => s.trim()).filter(Boolean),
+    ...aiFormSettings(),
   };
   const password = document.getElementById('connFormPassword').value;
   if (password) body.password = password;
@@ -1542,14 +1610,18 @@ async function pollJob(url, isRunning, signal) {
 }
 
 // "Approve all" can request dozens of long generations at once. Run only a few
-// at a time so they don't pile up behind the browser's per-host connection
-// limit, the server's worker threads and the Anthropic rate limit.
-const MAX_CONCURRENT_GENERATIONS = 3;
+// at a time so they don't pile up behind the server's worker threads and the AI
+// provider's rate limit; the connection says how many its provider takes.
+function maxConcurrentGenerations() {
+  const id = (currentPlan && currentPlan.connection_id) || activeConnectionId;
+  const conn = connections.find(c => c.id === id);
+  return (conn && conn.ai_concurrency) || 3;
+}
 let _activeGenerations = 0;
 const _generationWaiters = [];
 
 function acquireGenerationSlot(signal) {
-  if (_activeGenerations < MAX_CONCURRENT_GENERATIONS) {
+  if (_activeGenerations < maxConcurrentGenerations()) {
     _activeGenerations++;
     return Promise.resolve();
   }

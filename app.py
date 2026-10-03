@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-import anthropic
 from dotenv import load_dotenv
 from flask import (Flask, Response, jsonify, redirect, render_template, request,
                    send_from_directory, stream_with_context)
@@ -21,6 +20,7 @@ from flask_cors import CORS
 
 import image_gen
 import keys
+import llm
 import site_index
 from agent import OperationPlan, OperationStep, WikiAgent, _make_diff
 from wiki_client import WikiClient
@@ -42,9 +42,6 @@ UPLOADS_DIR = DATA_DIR / 'uploads'
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 site_index.set_storage_dir(DATA_DIR)
 image_gen.set_storage_dir(DATA_DIR)
-
-ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
-anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 _plans: dict[str, OperationPlan] = {}
 _wiki_clients: dict[str, WikiClient] = {}
@@ -120,13 +117,16 @@ def _public_connection(conn: dict) -> dict:
         public[f'has_{key}'] = bool(conn.get(key))
     # Which fal.ai key is saved, to compare with fal.ai's dashboard without re-entering it.
     public['fal_key_hint'] = keys.mask_key(conn['fal_key']) if conn.get('fal_key') else ''
+    ai = llm.settings_for(conn)
+    public['ai_label'] = ai.label
+    public['ai_concurrency'] = ai.spec.concurrency
     return public
 
 
 def _preflight(conn: dict, client: WikiClient | None, need_images: bool = False) -> str | None:
     """Why the keys the work needs aren't usable, checked before it starts; None if they are."""
-    if not ANTHROPIC_API_KEY.strip():
-        return 'ANTHROPIC_API_KEY is not set in .env. Add it, then rebuild the container.'
+    if problem := llm.key_problem(llm.settings_for(conn)):
+        return problem
     fal_key, source = image_gen.fal_key_for(conn)
     if fal_key:
         if problem := keys.fal_key_problem(fal_key, conn.get('password')):
@@ -167,7 +167,7 @@ class _ImageStyleStore:
 
 
 def _make_agent(client: WikiClient, conn: dict, **kwargs) -> WikiAgent:
-    return WikiAgent(client, anthropic_client, conn.get('system_prompt', ''), conn['id'],
+    return WikiAgent(client, llm.LLM(llm.settings_for(conn)), conn.get('system_prompt', ''), conn['id'],
                      image_generator=image_gen.from_connection(conn),
                      style_store=_ImageStyleStore(conn['id']), **kwargs)
 
@@ -404,7 +404,8 @@ def _attach_uploads_to_plan(plan: OperationPlan, context_pages: list):
 @app.route('/api/connections', methods=['GET'])
 def list_connections():
     data = _load_connections()
-    return jsonify({**data, 'connections': [_public_connection(c) for c in data.get('connections', [])]})
+    return jsonify({**data, 'connections': [_public_connection(c) for c in data.get('connections', [])],
+                    'ai_keys': llm.keys_present(), 'deepseek_models': llm.DEEPSEEK_MODELS})
 
 
 def _check_secrets(body: dict, conn: dict | None = None) -> str | None:
@@ -432,7 +433,7 @@ def _stamp_secrets(conn: dict, body: dict):
 @app.route('/api/connections', methods=['POST'])
 def add_connection():
     body = request.json or {}
-    if problem := _check_secrets(body):
+    if problem := _check_secrets(body) or llm.settings_problem(body):
         return jsonify({'error': problem}), 400
     conn = {
         'id': str(uuid.uuid4()),
@@ -448,6 +449,9 @@ def add_connection():
         'image_params': body.get('image_params'),
         'images_per_page': body.get('images_per_page', image_gen.DEFAULT_IMAGES_PER_PAGE),
         'image_style': body.get('image_style', ''),
+        'ai_provider': body.get('ai_provider', ''),
+        'deepseek_model': body.get('deepseek_model', ''),
+        'deepseek_effort': body.get('deepseek_effort', ''),
     }
     _stamp_secrets(conn, body)
     with _connections_lock:
@@ -466,7 +470,7 @@ def update_connection(conn_id: str):
         data = _load_connections()
         for conn in data['connections']:
             if conn['id'] == conn_id:
-                if problem := _check_secrets(body, conn):
+                if problem := _check_secrets(body, conn) or llm.settings_problem(body):
                     return jsonify({'error': problem}), 400
                 conn.update({k: v for k, v in body.items()
                              if k != 'id' and not k.startswith('has_') and not (k in _SECRET_FIELDS and not v)})
@@ -538,6 +542,10 @@ def refresh_index(conn_id: str):
         return jsonify({'error': str(e)}), 500
 
 
+# Form fields the style draft uses as typed, saved or not.
+_DRAFT_FORM_FIELDS = ('system_prompt', 'ai_provider', 'deepseek_model', 'deepseek_effort')
+
+
 @app.route('/api/connections/<conn_id>/image_style/draft', methods=['POST'])
 def draft_image_style(conn_id: str):
     """Draft a house image style from the wiki's system prompt and site index."""
@@ -545,8 +553,12 @@ def draft_image_style(conn_id: str):
     if not conn:
         return jsonify({'error': 'Not found'}), 404
     body = request.json or {}
-    # Use the system prompt as currently typed in the form, saved or not.
-    conn = {**conn, 'system_prompt': body.get('system_prompt', conn.get('system_prompt', ''))}
+    if problem := llm.settings_problem(body):
+        return jsonify({'error': problem}), 400
+    # Use the system prompt and AI settings as currently set in the form, saved or not.
+    conn = {**conn, **{k: body[k] for k in _DRAFT_FORM_FIELDS if k in body}}
+    if problem := llm.key_problem(llm.settings_for(conn)):
+        return jsonify({'error': problem}), 400
     client = get_wiki_client(conn_id)
     index = _site_index(client, conn) if client else {}
     agent = _make_agent(client, conn, site_index=index)
